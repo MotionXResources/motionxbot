@@ -1,0 +1,25 @@
+{
+  "name": "motionxbot",
+  "version": "1.0.0",
+  "description": "Automation-first Discord bot with a large slash-command surface.",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "deploy": "node scripts/deploy-commands.js",
+    "check": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check.ps1"
+  },
+  "keywords": [
+    "discord",
+    "bot",
+    "automation"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "discord.js": "^14.19.3",
+    "dotenv": "^16.6.1"
+  }
+}
