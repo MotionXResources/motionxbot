@@ -9,7 +9,7 @@ module.exports = {
       "**Scheduling:** `/reminder`, `/job`, `/heartbeat`",
       "**Reusable content:** `/tag`, `/template`",
       "**Operational tracking:** `/checklist`, `/todo`, `/approval`",
-      "**Server automation:** `/autorole`, `/bulkrole`, `/channel`, `/cleanup`, `/logchannel`, `/transfer`",
+      "**Server automation:** `/autorole`, `/bulkrole`, `/channel`, `/cleanup`, `/logchannel`, `/transfer messages`, `/transfer all`",
       "**Bot status:** `/botstatus`",
       "",
       "Most time fields accept compact durations like `15m`, `2h`, `1d`, or `1h30m`."

@@ -17,7 +17,7 @@ This project is aimed at boring, useful server work instead of fun commands. It 
 - Bulk adds or removes roles with `/bulkrole`
 - Locks, unlocks, archives, or slowmodes channels with `/channel`
 - Deletes recent bot or user messages with `/cleanup`
-- Copies batches of messages plus attachments between channels with `/transfer`
+- Copies recent or full-channel message history plus attachments between channels with `/transfer`
 - Tracks approval requests with `/approval`
 - Sends audit events to a log channel with `/logchannel`
 - Shows a quick automation summary with `/botstatus`
@@ -68,7 +68,7 @@ npm start
 - `/bulkrole add|remove`
 - `/channel lock|unlock|slowmode|archive`
 - `/cleanup bot|user`
-- `/transfer messages`
+- `/transfer messages|all`
 - `/approval create|list|approve|reject`
 - `/logchannel set|clear|show`
 - `/heartbeat set|status|clear`
@@ -80,7 +80,8 @@ npm start
 - Templates and scheduled messages support built-ins like `{server}`, `{channel}`, `{user}`, `{date}`, and `{time}`.
 - Data is stored locally in `data/store.json`, so this is easy to run without a database.
 - For auto-role and bulk-role commands, the bot role needs to sit above the roles it manages.
-- `/transfer messages` reposts content and re-uploads attachments with attribution. It does not impersonate the original authors.
+- `/transfer messages` and `/transfer all` repost content and re-upload attachments with attribution. They do not impersonate the original authors.
+- `/transfer all` walks the full readable channel history in batches of 100 and can take time on large channels.
 
 ## Validation
 
