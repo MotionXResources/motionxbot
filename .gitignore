@@ -2,3 +2,6 @@ node_modules/
 .env
 data/store.json
 *.log
+.venv/
+__pycache__/
+*.pyc

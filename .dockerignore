@@ -2,3 +2,5 @@ node_modules
 npm-debug.log
 .env
 data/store.json
+.venv
+__pycache__

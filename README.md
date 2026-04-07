@@ -1,61 +1,10 @@
 # MotionXBot
 
-Automation-first Discord bot built with `discord.js`.
+Automation-first Discord bot rewritten in Python with `discord.py`.
 
-This project is aimed at boring, useful server work instead of fun commands. It ships with 50+ slash subcommands across scheduling, reusable messaging, approvals, checklists, todos, role automation, channel ops, and cleanup workflows.
+This build keeps the same operations-first command surface as the earlier JavaScript version: reminders, recurring jobs, templates, tags, approvals, todos, checklists, autoroles, bulk role changes, channel moderation, cleanup, heartbeat jobs, and message/forum transfer tooling.
 
-## What it does
-
-- Schedules one-time reminders with `/reminder create`
-- Runs recurring channel jobs with `/job create`
-- Sends recurring heartbeat messages with `/heartbeat set`
-- Stores reusable snippets with `/tag`
-- Stores placeholder-driven templates with `/template`
-- Tracks shared operational checklists with `/checklist`
-- Tracks team todos with `/todo`
-- Applies roles automatically to new members with `/autorole`
-- Bulk adds or removes roles with `/bulkrole`
-- Locks, unlocks, archives, or slowmodes channels with `/channel`
-- Deletes recent bot or user messages with `/cleanup`
-- Copies recent history, full channels, or full forum post threads plus attachments with `/transfer`
-- Tracks approval requests with `/approval`
-- Sends audit events to a log channel with `/logchannel`
-- Shows a quick automation summary with `/botstatus`
-
-## Setup
-
-1. Install dependencies:
-
-```bash
-npm install
-```
-
-2. Copy the example env file and fill in your Discord app values:
-
-```bash
-copy .env.example .env
-```
-
-3. Add these values in `.env`:
-
-- `DISCORD_TOKEN`
-- `DISCORD_CLIENT_ID`
-- `DISCORD_GUILD_ID` for fast guild-scoped command registration during development
-- `BOT_STATUS` optional custom status text
-
-4. Register slash commands:
-
-```bash
-npm run deploy
-```
-
-5. Start the bot:
-
-```bash
-npm start
-```
-
-## Command groups
+## Features
 
 - `/automation-help`
 - `/reminder create|list|cancel|snooze`
@@ -64,59 +13,77 @@ npm start
 - `/template create|update|send|list|delete`
 - `/checklist create|add-item|done|reset|show|list|delete`
 - `/todo add|list|done|remove`
+- `/approval create|list|approve|reject`
 - `/autorole add|remove|list`
 - `/bulkrole add|remove`
 - `/channel lock|unlock|slowmode|archive`
 - `/cleanup bot|user`
-- `/transfer messages|all|forum`
-- `/approval create|list|approve|reject`
 - `/logchannel set|clear|show`
 - `/heartbeat set|status|clear`
+- `/transfer messages|all|forum`
 - `/botstatus`
+
+## Setup
+
+1. Create a virtual environment and install dependencies:
+
+```bash
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+2. Copy the env template:
+
+```bash
+copy .env.example .env
+```
+
+3. Fill in:
+
+- `DISCORD_TOKEN`
+- `DISCORD_GUILD_ID`
+- `BOT_STATUS`
+- `PORT`
+
+`DISCORD_CLIENT_ID` is optional now and kept only for compatibility with older setups.
+
+4. Start the bot:
+
+```bash
+python -m motionxbot
+```
+
+The bot now syncs slash commands on startup. If `DISCORD_GUILD_ID` is set, it syncs to that guild for faster updates. Otherwise it syncs globally.
 
 ## Notes
 
-- Time inputs accept values like `15m`, `2h`, `1d`, or `1h30m`.
-- Templates and scheduled messages support built-ins like `{server}`, `{channel}`, `{user}`, `{date}`, and `{time}`.
-- Data is stored locally in `data/store.json`, so this is easy to run without a database.
-- For auto-role and bulk-role commands, the bot role needs to sit above the roles it manages.
-- `/transfer messages` and `/transfer all` repost content and re-upload attachments with attribution. They do not impersonate the original authors.
-- `/transfer all` walks the full readable channel history in batches of 100 and can take time on large channels.
-- `/transfer forum` recreates forum posts as new threads in another forum and then copies the messages/files inside each post thread.
-- Forum tags only carry over automatically when the target forum already has tags with matching names.
+- Time fields accept compact durations like `15m`, `2h`, `1d`, or `1h30m`.
+- Data is stored in `data/store.json`.
+- `/transfer` reposts messages and files with attribution. It does not impersonate the original authors.
+- `/transfer forum` recreates forum posts in the target forum and then copies the thread history into them.
+- Forum tags only carry across automatically when the target forum already has matching tag names.
+- This bot requires the `Message Content` and `Server Members` privileged intents in the Discord Developer Portal.
 
 ## Validation
 
-Run the syntax checker with:
+Run:
 
 ```bash
-npm run check
+powershell -ExecutionPolicy Bypass -File scripts/check.ps1
 ```
 
-## Free hosting
+## PebbleHost
 
-The best fit for a free always-on Discord bot is currently Northflank, not Vercel. This bot now exposes:
+For PebbleHost Python hosting:
 
-- `/healthz` for platform health checks
-- port `3000`
-- a production `Dockerfile`
+- startup command: `python -m motionxbot`
+- Python version: `3.11+`
+- install command: `pip install -r requirements.txt`
 
-### Recommended host: Northflank
+## Docker
 
-1. Push this repo to GitHub.
-2. In Northflank, create a new service from the repo.
-3. Let it build from the included `Dockerfile`.
-4. Add environment variables:
-   - `DISCORD_TOKEN`
-   - `DISCORD_CLIENT_ID`
-   - `DISCORD_GUILD_ID`
-   - `BOT_STATUS`
-   - `PORT=3000`
-5. Set the service port to `3000`.
-6. Use `/healthz` as the health check path.
-
-### Important storage note
-
-This project currently stores automation data in `data/store.json`. On most free cloud hosts, local disk is ephemeral, so reminders, todos, templates, and other saved bot data can be lost after redeploys or restarts.
-
-If you want durable cloud hosting, the next upgrade should be moving storage to a database.
+```bash
+docker build -t motionxbot .
+docker run --env-file .env -p 3000:3000 motionxbot
+```
