@@ -20,6 +20,7 @@ This build keeps the same operations-first command surface as the earlier JavaSc
 - `/cleanup bot|user`
 - `/logchannel set|clear|show`
 - `/heartbeat set|status|clear`
+- `/audio search`
 - `/transfer messages|all|forum|thread`
 - `/botstatus`
 
@@ -61,6 +62,7 @@ The bot now syncs slash commands on startup. If `DISCORD_GUILD_ID` is set, it sy
 - Time fields accept compact durations like `15m`, `2h`, `1d`, or `1h30m`.
 - Data is stored in `data/store.json`.
 - `/transfer` reposts messages and files with short attribution. It does not impersonate the original authors.
+- `/audio search` finds audio attachments by filename across a text channel, a thread, or an entire forum and returns jump links.
 - `/transfer forum` recreates forum posts in the target forum and then copies the thread history into them.
 - `/transfer thread` now accepts either a forum or a thread as the source, and either a forum or a thread as the target.
 - Transfer commands support an `mp3_only` option when you want to copy only MP3 attachments, with no pasted caption text.

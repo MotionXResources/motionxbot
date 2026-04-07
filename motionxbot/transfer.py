@@ -11,6 +11,17 @@ MAX_CONTENT_LENGTH = 2000
 HARD_LIMIT = 100
 DEFAULT_UPLOAD_LIMIT_BYTES = 8 * 1024 * 1024
 PROGRESS_UPDATE_INTERVAL = 25
+AUDIO_FILE_EXTENSIONS = {
+    ".aac",
+    ".alac",
+    ".flac",
+    ".m4a",
+    ".mp3",
+    ".ogg",
+    ".opus",
+    ".wav",
+    ".wma",
+}
 
 
 def split_content(text: str | None, first_chunk_budget: int) -> list[str]:
@@ -56,6 +67,12 @@ def build_text_caption(author_id: int) -> str:
 def build_thread_source_label(source_thread: discord.Thread) -> str:
     parent_label = str(source_thread.parent) if source_thread.parent else "#forum"
     return f"{parent_label} / {source_thread.name}"
+
+
+def is_audio_attachment(attachment: discord.Attachment) -> bool:
+    filename = attachment.filename.strip().lower()
+    content_type = (attachment.content_type or "").lower()
+    return any(filename.endswith(extension) for extension in AUDIO_FILE_EXTENSIONS) or content_type.startswith("audio/")
 
 
 def is_mp3_attachment(attachment: discord.Attachment) -> bool:
