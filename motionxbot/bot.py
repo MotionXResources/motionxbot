@@ -179,6 +179,246 @@ class MotionXBot(commands.Bot):
         if not interaction.response.is_done():
             await interaction.response.defer(ephemeral=True)
 
+    def get_default_audio_search_source(
+        self, channel: Any
+    ) -> Optional[discord.abc.Messageable]:
+        if isinstance(channel, (discord.TextChannel, discord.Thread)):
+            return channel
+        return None
+
+    def describe_audio_location(self, message: discord.Message) -> str:
+        channel = message.channel
+        if isinstance(channel, discord.Thread):
+            parent = channel.parent.mention if channel.parent else "#forum"
+            return f"{parent} / {channel.mention}"
+        if isinstance(channel, discord.TextChannel):
+            return channel.mention
+        return str(channel)
+
+    def collect_audio_matches(
+        self,
+        messages: list[discord.Message],
+        query: str,
+    ) -> list[tuple[discord.Message, discord.Attachment]]:
+        normalized_query = query.strip().lower()
+        matches: list[tuple[discord.Message, discord.Attachment]] = []
+        for message in reversed(messages):
+            for attachment in message.attachments:
+                if not is_audio_attachment(attachment):
+                    continue
+                if normalized_query not in attachment.filename.lower():
+                    continue
+                matches.append((message, attachment))
+        return matches
+
+    def build_audio_result_embed(
+        self,
+        query: str,
+        match: tuple[discord.Message, discord.Attachment],
+        index: int,
+        total: int,
+    ) -> discord.Embed:
+        message, attachment = match
+        channel = message.channel
+        location_label = "Thread" if isinstance(channel, discord.Thread) else "Channel"
+        embed = discord.Embed(
+            title=attachment.filename,
+            description=f"Audio search result for `{query}`",
+            color=discord.Color.blurple(),
+            timestamp=message.created_at,
+        )
+        embed.add_field(name="Creator", value=message.author.mention, inline=True)
+        embed.add_field(name=location_label, value=self.describe_audio_location(message), inline=True)
+        embed.add_field(
+            name="Posted",
+            value=render_discord_timestamp(int(message.created_at.timestamp() * 1000)),
+            inline=True,
+        )
+        embed.set_footer(text=f"Result {index} of {total}")
+        if message.author.display_avatar:
+            embed.set_author(
+                name=str(message.author),
+                icon_url=message.author.display_avatar.url,
+            )
+        return embed
+
+    def build_audio_result_view(
+        self,
+        match: tuple[discord.Message, discord.Attachment],
+    ) -> discord.ui.View:
+        message, attachment = match
+        channel = message.channel
+        open_label = "Open Thread" if isinstance(channel, discord.Thread) else "Open Message"
+        view = discord.ui.View()
+        view.add_item(
+            discord.ui.Button(
+                label="Download Audio",
+                style=discord.ButtonStyle.link,
+                url=attachment.url,
+            )
+        )
+        view.add_item(
+            discord.ui.Button(
+                label=open_label,
+                style=discord.ButtonStyle.link,
+                url=message.jump_url,
+            )
+        )
+        return view
+
+    async def send_audio_search_results_interaction(
+        self,
+        interaction: discord.Interaction,
+        query: str,
+        matches: list[tuple[discord.Message, discord.Attachment]],
+    ) -> None:
+        total = len(matches)
+        first_embed = self.build_audio_result_embed(query, matches[0], 1, total)
+        first_view = self.build_audio_result_view(matches[0])
+
+        if interaction.response.is_done():
+            await interaction.edit_original_response(content=None, embed=first_embed, view=first_view)
+        else:
+            await interaction.response.send_message(embed=first_embed, view=first_view, ephemeral=True)
+
+        for index, match in enumerate(matches[1:], start=2):
+            await interaction.followup.send(
+                embed=self.build_audio_result_embed(query, match, index, total),
+                view=self.build_audio_result_view(match),
+                ephemeral=True,
+            )
+
+    async def send_audio_search_results_message(
+        self,
+        message: discord.Message,
+        query: str,
+        matches: list[tuple[discord.Message, discord.Attachment]],
+    ) -> None:
+        total = len(matches)
+        for index, match in enumerate(matches, start=1):
+            await message.channel.send(
+                embed=self.build_audio_result_embed(query, match, index, total),
+                view=self.build_audio_result_view(match),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+
+    async def search_audio_in_source(
+        self,
+        source_obj: discord.abc.Messageable,
+        query: str,
+        *,
+        include_bots: bool,
+        interaction: Optional[discord.Interaction] = None,
+    ) -> list[tuple[discord.Message, discord.Attachment]]:
+        normalized_query = query.strip()
+        matches: list[tuple[discord.Message, discord.Attachment]] = []
+        last_progress_at = 0.0
+
+        if isinstance(source_obj, (discord.TextChannel, discord.Thread)):
+            source_label = source_obj.mention
+
+            async def progress(scanned: int, queued: int) -> None:
+                del queued
+                nonlocal last_progress_at
+                if interaction is None or self.loop.time() - last_progress_at < 2.5:
+                    return
+                last_progress_at = self.loop.time()
+                await interaction.edit_original_response(
+                    content=f"Scanning {source_label} for audio named `{normalized_query}`...\nScanned: {scanned}"
+                )
+
+            messages = await collect_messages(
+                source_obj,
+                all_messages=True,
+                limit=None,
+                before=None,
+                include_bots=include_bots,
+                on_progress=progress if interaction is not None else None,
+            )
+            matches = self.collect_audio_matches(messages, normalized_query)
+        elif isinstance(source_obj, discord.ForumChannel):
+            async def forum_progress(found: int, archived_scanned: int) -> None:
+                nonlocal last_progress_at
+                if interaction is None or self.loop.time() - last_progress_at < 2.5:
+                    return
+                last_progress_at = self.loop.time()
+                await interaction.edit_original_response(
+                    content=(
+                        f"Scanning forum {source_obj.mention} for audio named `{normalized_query}`...\n"
+                        f"Threads found: {found}\nArchived scanned: {archived_scanned}"
+                    )
+                )
+
+            threads = await collect_forum_threads(source_obj, forum_progress if interaction is not None else None)
+            scanned_threads = 0
+            scanned_messages = 0
+            for thread in threads:
+                thread_messages = await collect_messages(
+                    thread,
+                    all_messages=True,
+                    limit=None,
+                    before=None,
+                    include_bots=include_bots,
+                    on_progress=None,
+                )
+                scanned_threads += 1
+                scanned_messages += len(thread_messages)
+                matches.extend(self.collect_audio_matches(thread_messages, normalized_query))
+                if interaction is not None and self.loop.time() - last_progress_at >= 2.5:
+                    last_progress_at = self.loop.time()
+                    await interaction.edit_original_response(
+                        content=(
+                            f"Searching forum {source_obj.mention} for audio named `{normalized_query}`...\n"
+                            f"Threads scanned: {scanned_threads}/{len(threads)}\n"
+                            f"Messages scanned: {scanned_messages}\n"
+                            f"Matches found: {len(matches)}"
+                        )
+                    )
+
+        matches.sort(key=lambda item: item[0].created_at, reverse=True)
+        return matches
+
+    async def on_message(self, message: discord.Message) -> None:
+        if message.author.bot:
+            return
+
+        normalized = message.content.strip()
+        lowered = normalized.lower()
+        if lowered == "mtxaudios" or lowered.startswith("mtxaudios "):
+            query = normalized[len("mtxaudios") :].strip()
+            if not query:
+                await message.reply(
+                    "Use `mtxaudios your-audio-name` in the channel or thread you want to search.",
+                    mention_author=False,
+                )
+            elif message.guild is None:
+                await message.reply(
+                    "This command only works in a server.",
+                    mention_author=False,
+                )
+            else:
+                source_obj = self.get_default_audio_search_source(message.channel)
+                if source_obj is None:
+                    await message.reply(
+                        "Run `mtxaudios ...` inside a text channel or thread.",
+                        mention_author=False,
+                    )
+                else:
+                    matches = await self.search_audio_in_source(
+                        source_obj,
+                        query,
+                        include_bots=True,
+                    )
+                    if not matches:
+                        await message.reply(
+                            f"No audio attachments matching `{query}` were found here.",
+                            mention_author=False,
+                        )
+                    else:
+                        await self.send_audio_search_results_message(message, query, matches[:5])
+
+        await self.process_commands(message)
+
     @tasks.loop(seconds=15)
     async def scheduler(self) -> None:
         for guild_id in list(self.store.data["guilds"].keys()):
@@ -287,7 +527,7 @@ class MotionXBot(commands.Bot):
                 "**Scheduling:** `/reminder`, `/job`, `/heartbeat`",
                 "**Reusable content:** `/tag`, `/template`",
                 "**Operational tracking:** `/checklist`, `/todo`, `/approval`",
-                "**Server automation:** `/autorole`, `/bulkrole`, `/channel`, `/cleanup`, `/logchannel`, `/transfer messages`, `/transfer all`, `/transfer forum`, `/transfer thread`, `/audio search`",
+                "**Server automation:** `/autorole`, `/bulkrole`, `/channel`, `/cleanup`, `/logchannel`, `/transfer messages`, `/transfer all`, `/transfer forum`, `/transfer thread`, `/audio search`, `mtxaudios <query>`",
                 "**Bot status:** `/botstatus`",
                 "",
                 "Most time fields accept compact durations like `15m`, `2h`, `1d`, or `1h30m`.",
@@ -1283,60 +1523,6 @@ class MotionXBot(commands.Bot):
 
         audio_group = app_commands.Group(name="audio", description="Search audio attachments by filename.")
 
-        def describe_audio_location(message: discord.Message) -> str:
-            channel = message.channel
-            if isinstance(channel, discord.Thread):
-                parent = channel.parent.mention if channel.parent else "#forum"
-                return f"{parent} / {channel.mention}"
-            if isinstance(channel, discord.TextChannel):
-                return channel.mention
-            return str(channel)
-
-        def collect_audio_matches(
-            messages: list[discord.Message],
-            query: str,
-        ) -> list[tuple[discord.Message, discord.Attachment]]:
-            normalized_query = query.strip().lower()
-            matches: list[tuple[discord.Message, discord.Attachment]] = []
-            for message in reversed(messages):
-                for attachment in message.attachments:
-                    if not is_audio_attachment(attachment):
-                        continue
-                    if normalized_query not in attachment.filename.lower():
-                        continue
-                    matches.append((message, attachment))
-            return matches
-
-        async def send_audio_search_results(
-            interaction: discord.Interaction,
-            header: str,
-            matches: list[tuple[discord.Message, discord.Attachment]],
-        ) -> None:
-            chunks: list[str] = []
-            current_lines = [header]
-            current_length = len(header)
-            for message, attachment in matches:
-                line = f"`{attachment.filename}` - {describe_audio_location(message)} - {message.jump_url}"
-                line_length = len(line) + 1
-                if current_length + line_length > 2000 and current_lines:
-                    chunks.append("\n".join(current_lines))
-                    current_lines = [line]
-                    current_length = len(line)
-                else:
-                    current_lines.append(line)
-                    current_length += line_length
-
-            if current_lines:
-                chunks.append("\n".join(current_lines))
-
-            if interaction.response.is_done():
-                await interaction.edit_original_response(content=chunks[0])
-            else:
-                await interaction.response.send_message(chunks[0], ephemeral=True)
-
-            for chunk in chunks[1:]:
-                await interaction.followup.send(chunk, ephemeral=True)
-
         @audio_group.command(name="search", description="Search for audio attachments by filename in a channel, thread, or forum.")
         async def audio_search(
             interaction: discord.Interaction,
@@ -1344,20 +1530,17 @@ class MotionXBot(commands.Bot):
             source_channel: Optional[discord.TextChannel] = None,
             source_thread: Optional[discord.Thread] = None,
             source_forum: Optional[discord.ForumChannel] = None,
-            include_bots: bool = True,
-            limit: app_commands.Range[int, 1, 25] = 10,
+            limit: app_commands.Range[int, 1, 5] = 5,
         ) -> None:
             if interaction.guild is None:
                 await self.reply_ephemeral(interaction, "This command can only be used in a server.")
                 return
-            if not await self.ensure_permissions(interaction, "`/audio search`", manage_messages=True):
-                return
 
             selected_sources = [item for item in (source_channel, source_thread, source_forum) if item is not None]
-            if len(selected_sources) != 1:
+            if len(selected_sources) > 1:
                 await self.reply_ephemeral(
                     interaction,
-                    "Choose exactly one source: a text channel, a thread, or a forum.",
+                    "Choose only one source override at a time.",
                 )
                 return
 
@@ -1367,70 +1550,23 @@ class MotionXBot(commands.Bot):
                 return
 
             await self.defer_ephemeral(interaction)
-            source_obj = selected_sources[0]
-            matches: list[tuple[discord.Message, discord.Attachment]] = []
-
-            if source_channel is not None or source_thread is not None:
-                source_label = source_obj.mention
-                last_progress_at = 0.0
-
-                async def progress(scanned: int, queued: int) -> None:
-                    del queued
-                    nonlocal last_progress_at
-                    if self.loop.time() - last_progress_at < 2.5:
-                        return
-                    last_progress_at = self.loop.time()
-                    await interaction.edit_original_response(
-                        content=f"Scanning {source_label} for audio named `{normalized_query}`...\nScanned: {scanned}"
-                    )
-
-                messages = await collect_messages(
-                    source_obj,
-                    all_messages=True,
-                    limit=None,
-                    before=None,
-                    include_bots=include_bots,
-                    on_progress=progress,
+            source_obj = (
+                selected_sources[0]
+                if selected_sources
+                else self.get_default_audio_search_source(interaction.channel)
+            )
+            if source_obj is None:
+                await interaction.edit_original_response(
+                    content="Run this in the channel or thread you want to search, or choose a source override."
                 )
-                matches = collect_audio_matches(messages, normalized_query)
-            else:
-                assert source_forum is not None
-                last_progress_at = 0.0
+                return
 
-                async def forum_progress(found: int, archived_scanned: int) -> None:
-                    nonlocal last_progress_at
-                    if self.loop.time() - last_progress_at < 2.5:
-                        return
-                    last_progress_at = self.loop.time()
-                    await interaction.edit_original_response(
-                        content=f"Scanning forum {source_forum.mention} for audio named `{normalized_query}`...\nThreads found: {found}\nArchived scanned: {archived_scanned}"
-                    )
-
-                threads = await collect_forum_threads(source_forum, forum_progress)
-                scanned_threads = 0
-                scanned_messages = 0
-                for thread in threads:
-                    thread_messages = await collect_messages(
-                        thread,
-                        all_messages=True,
-                        limit=None,
-                        before=None,
-                        include_bots=include_bots,
-                        on_progress=None,
-                    )
-                    scanned_threads += 1
-                    scanned_messages += len(thread_messages)
-                    matches.extend(collect_audio_matches(thread_messages, normalized_query))
-                    if self.loop.time() - last_progress_at >= 2.5:
-                        last_progress_at = self.loop.time()
-                        await interaction.edit_original_response(
-                            content=(
-                                f"Searching forum {source_forum.mention} for audio named `{normalized_query}`...\n"
-                                f"Threads scanned: {scanned_threads}/{len(threads)}\n"
-                                f"Messages scanned: {scanned_messages}\n"
-                                f"Matches found: {len(matches)}"
-                            )
-                        )
+            matches = await self.search_audio_in_source(
+                source_obj,
+                normalized_query,
+                include_bots=True,
+                interaction=interaction,
+            )
 
             if not matches:
                 await interaction.edit_original_response(
@@ -1438,13 +1574,12 @@ class MotionXBot(commands.Bot):
                 )
                 return
 
-            matches.sort(key=lambda item: item[0].created_at, reverse=True)
             shown_matches = matches[:limit]
-            header = (
-                f"Found {len(matches)} matching audio file(s) for `{normalized_query}` in {source_obj.mention}. "
-                f"Showing {len(shown_matches)} newest result(s)."
+            await self.send_audio_search_results_interaction(
+                interaction,
+                normalized_query,
+                shown_matches,
             )
-            await send_audio_search_results(interaction, header, shown_matches)
 
         transfer_group = app_commands.Group(name="transfer", description="Copy batches of messages and attachments between channels.")
 
