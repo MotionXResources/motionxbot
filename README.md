@@ -20,7 +20,7 @@ This build keeps the same operations-first command surface as the earlier JavaSc
 - `/cleanup bot|user`
 - `/logchannel set|clear|show`
 - `/heartbeat set|status|clear`
-- `/transfer messages|all|forum`
+- `/transfer messages|all|forum|thread`
 - `/botstatus`
 
 ## Setup
@@ -60,8 +60,9 @@ The bot now syncs slash commands on startup. If `DISCORD_GUILD_ID` is set, it sy
 
 - Time fields accept compact durations like `15m`, `2h`, `1d`, or `1h30m`.
 - Data is stored in `data/store.json`.
-- `/transfer` reposts messages and files with attribution. It does not impersonate the original authors.
+- `/transfer` reposts messages and files with short attribution. It does not impersonate the original authors.
 - `/transfer forum` recreates forum posts in the target forum and then copies the thread history into them.
+- `/transfer thread` copies one specific thread to a text channel, another thread, or a forum.
 - Forum tags only carry across automatically when the target forum already has matching tag names.
 - This bot requires the `Message Content` and `Server Members` privileged intents in the Discord Developer Portal.
 

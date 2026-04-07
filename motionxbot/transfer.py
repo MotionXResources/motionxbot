@@ -44,13 +44,13 @@ def split_text_by_limit(text: str) -> list[str]:
     return split_content(text, MAX_CONTENT_LENGTH)
 
 
-def build_header(*, source_label: str, timestamp: float, author_tag: str, author_id: int) -> str:
-    return "\n".join(
-        [
-            f"**Copied from** {source_label} - <t:{int(timestamp)}:f>",
-            f"**Original author:** {author_tag} ({author_id})",
-        ]
-    )
+def build_attachment_caption(author_id: int, filenames: list[str]) -> str:
+    quoted = ", ".join(f'"{name}"' for name in filenames)
+    return f"({quoted} by <@{author_id}>)"
+
+
+def build_text_caption(author_id: int) -> str:
+    return f"(by <@{author_id}>)"
 
 
 def build_thread_source_label(source_thread: discord.Thread) -> str:
@@ -123,27 +123,28 @@ async def repost_message(
     session: aiohttp.ClientSession,
     source_label: str | None = None,
 ) -> None:
-    source = source_label or str(message.channel)
-    header = build_header(
-        source_label=source,
-        timestamp=message.created_at.timestamp(),
-        author_tag=str(message.author),
-        author_id=message.author.id,
-    )
-    content_chunks = split_content(message.content or "", max(1, MAX_CONTENT_LENGTH - len(header) - 2))
+    del source_label
+    content_chunks = split_content(message.content or "", MAX_CONTENT_LENGTH)
     upload_limit = getattr(message.guild, "filesize_limit", DEFAULT_UPLOAD_LIMIT_BYTES)
     file_batches, skipped = await build_attachment_batches(session, message, upload_limit)
     first_file_batch = file_batches.pop(0) if file_batches else []
+    first_filenames = [attachment.filename for attachment in message.attachments[: len(first_file_batch)]]
 
     if not content_chunks and not first_file_batch:
         await target_channel.send(
-            f"{header}\n*No plain-text content. Unsupported embeds, stickers, and special message types are not copied exactly.*",
+            f"*Unsupported content* {build_text_caption(message.author.id)}",
             allowed_mentions=discord.AllowedMentions.none(),
         )
     else:
         first_body = content_chunks.pop(0) if content_chunks else ""
+        footer = (
+            build_attachment_caption(message.author.id, first_filenames)
+            if first_file_batch
+            else build_text_caption(message.author.id)
+        )
+        first_payload = f"{first_body}\n\n{footer}" if first_body else footer
         await target_channel.send(
-            f"{header}\n\n{first_body}" if first_body else header,
+            first_payload,
             files=first_file_batch,
             allowed_mentions=discord.AllowedMentions.none(),
         )
@@ -152,8 +153,9 @@ async def repost_message(
             await target_channel.send(chunk, allowed_mentions=discord.AllowedMentions.none())
 
     for batch in file_batches:
+        batch_filenames = [file.filename for file in batch]
         await target_channel.send(
-            f"Attachment continuation for original message `{message.id}`.",
+            build_attachment_caption(message.author.id, batch_filenames),
             files=batch,
             allowed_mentions=discord.AllowedMentions.none(),
         )
@@ -235,36 +237,34 @@ async def create_forum_post(
     starter_message: discord.Message | None,
     session: aiohttp.ClientSession,
 ) -> discord.Thread:
-    source_label = build_thread_source_label(source_thread)
     applied_tags = map_forum_tags(source_thread, source_forum, target_forum)
     upload_limit = getattr(target_forum.guild, "filesize_limit", DEFAULT_UPLOAD_LIMIT_BYTES)
 
     if starter_message:
-        header = build_header(
-            source_label=source_label,
-            timestamp=starter_message.created_at.timestamp(),
-            author_tag=str(starter_message.author),
-            author_id=starter_message.author.id,
-        )
-        starter_chunks = split_content(
-            starter_message.content or "*Original starter message had no text content.*",
-            max(1, MAX_CONTENT_LENGTH - len(header) - 2),
-        )
+        starter_chunks = split_content(starter_message.content or "", MAX_CONTENT_LENGTH)
         file_batches, skipped = await build_attachment_batches(session, starter_message, upload_limit)
     else:
-        header = f"**Copied from** {source_label}"
         starter_chunks = [
             "*Original starter message was unavailable, so this forum post was recreated from the remaining thread history.*"
         ]
         file_batches, skipped = [], []
 
     first_batch = file_batches.pop(0) if file_batches else []
+    first_filenames = [attachment.filename for attachment in starter_message.attachments[: len(first_batch)]] if starter_message else []
     first_chunk = starter_chunks.pop(0) if starter_chunks else ""
+    first_footer = (
+        build_attachment_caption(starter_message.author.id, first_filenames)
+        if starter_message and first_batch
+        else build_text_caption(starter_message.author.id)
+        if starter_message
+        else ""
+    )
+    first_payload = f"{first_chunk}\n\n{first_footer}" if first_chunk and first_footer else first_chunk or first_footer
     created = await target_forum.create_thread(
         name=(source_thread.name or f"copied-thread-{source_thread.id}")[:100],
         auto_archive_duration=source_thread.auto_archive_duration,
         slowmode_delay=getattr(source_thread, "slowmode_delay", 0) or None,
-        content=f"{header}\n\n{first_chunk}" if first_chunk else header,
+        content=first_payload or "*No text content.*",
         files=first_batch,
         applied_tags=applied_tags,
         allowed_mentions=discord.AllowedMentions.none(),
@@ -276,7 +276,9 @@ async def create_forum_post(
 
     for batch in file_batches:
         await new_thread.send(
-            f"Attachment continuation for original starter message in `{source_thread.name}`.",
+            build_attachment_caption(starter_message.author.id, [file.filename for file in batch])
+            if starter_message
+            else f'("{source_thread.name}" by @unknown)',
             files=batch,
             allowed_mentions=discord.AllowedMentions.none(),
         )
@@ -318,6 +320,28 @@ async def copy_forum_thread(
     if getattr(source_thread, "applied_tags", None):
         kwargs["applied_tags"] = map_forum_tags(source_thread, source_forum, target_forum)
     await created_thread.edit(**kwargs)
+
+
+async def copy_thread_to_channel(
+    source_thread: discord.Thread,
+    target_channel: discord.abc.Messageable,
+    include_bots: bool,
+    session: aiohttp.ClientSession,
+) -> int:
+    messages = await collect_messages(
+        source_thread,
+        all_messages=True,
+        limit=None,
+        before=None,
+        include_bots=include_bots,
+        on_progress=None,
+    )
+    source_label = build_thread_source_label(source_thread)
+    copied = 0
+    for message in messages:
+        await repost_message(target_channel, message, session, source_label)
+        copied += 1
+    return copied
 
 
 def build_summary(

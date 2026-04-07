@@ -21,6 +21,7 @@ from .transfer import (
     collect_forum_threads,
     collect_messages,
     copy_forum_thread,
+    copy_thread_to_channel,
     repost_message,
 )
 
@@ -282,7 +283,7 @@ class MotionXBot(commands.Bot):
                 "**Scheduling:** `/reminder`, `/job`, `/heartbeat`",
                 "**Reusable content:** `/tag`, `/template`",
                 "**Operational tracking:** `/checklist`, `/todo`, `/approval`",
-                "**Server automation:** `/autorole`, `/bulkrole`, `/channel`, `/cleanup`, `/logchannel`, `/transfer messages`, `/transfer all`, `/transfer forum`",
+                "**Server automation:** `/autorole`, `/bulkrole`, `/channel`, `/cleanup`, `/logchannel`, `/transfer messages`, `/transfer all`, `/transfer forum`, `/transfer thread`",
                 "**Bot status:** `/botstatus`",
                 "",
                 "Most time fields accept compact durations like `15m`, `2h`, `1d`, or `1h30m`.",
@@ -1450,6 +1451,65 @@ class MotionXBot(commands.Bot):
                     scanned=len(threads),
                     requested_all=True,
                     unit_label="forum post thread(s)",
+                )
+            )
+
+        @transfer_group.command(name="thread", description="Copy one specific thread into a channel, thread, or forum.")
+        async def transfer_thread(
+            interaction: discord.Interaction,
+            source: discord.Thread,
+            target_channel: Optional[discord.TextChannel] = None,
+            target_thread: Optional[discord.Thread] = None,
+            target_forum: Optional[discord.ForumChannel] = None,
+            include_bots: bool = True,
+        ) -> None:
+            if interaction.guild is None:
+                await self.reply_ephemeral(interaction, "This command can only be used in a server.")
+                return
+            if not await self.ensure_permissions(interaction, "`/transfer`", manage_messages=True):
+                return
+
+            selected_targets = [item for item in (target_channel, target_thread, target_forum) if item is not None]
+            if len(selected_targets) != 1:
+                await self.reply_ephemeral(
+                    interaction,
+                    "Choose exactly one target: a text channel, a thread, or a forum.",
+                )
+                return
+
+            await self.defer_ephemeral(interaction)
+            assert self.http_session is not None
+            failures: list[str] = []
+
+            try:
+                if target_forum is not None:
+                    if not isinstance(source.parent, discord.ForumChannel):
+                        await interaction.edit_original_response(
+                            content="That source thread is not inside a forum, so it cannot be recreated as a forum post."
+                        )
+                        return
+                    await copy_forum_thread(source.parent, target_forum, source, include_bots, self.http_session)
+                    copied = 1
+                    unit_label = "thread"
+                    target_label = target_forum.mention
+                else:
+                    destination = target_thread or target_channel
+                    copied = await copy_thread_to_channel(source, destination, include_bots, self.http_session)
+                    unit_label = "message(s)"
+                    target_label = destination.mention
+            except Exception as error:  # noqa: BLE001
+                failures.append(str(error))
+                copied = 0
+                unit_label = "message(s)"
+                target_label = selected_targets[0].mention
+
+            await interaction.edit_original_response(
+                content="\n".join(
+                    [
+                        f"Copied {copied} {unit_label} from {source.mention} to {target_label}.",
+                        f"Failed: {len(failures)}",
+                        *failures[:10],
+                    ]
                 )
             )
 
