@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from typing import Any, Optional, Tuple
 from uuid import uuid4
@@ -36,6 +37,9 @@ def now_ms() -> int:
 
 def make_id() -> str:
     return uuid4().hex[:8]
+
+
+CREATOR_CAPTION_RE = re.compile(r"^created by <@!?(\d+)>$", re.IGNORECASE)
 
 
 class MotionXBot(commands.Bot):
@@ -199,35 +203,62 @@ class MotionXBot(commands.Bot):
         self,
         messages: list[discord.Message],
         query: str,
-    ) -> list[tuple[discord.Message, discord.Attachment]]:
+    ) -> list[tuple[discord.Message, discord.Attachment, Optional[int]]]:
         normalized_query = query.strip().lower()
-        matches: list[tuple[discord.Message, discord.Attachment]] = []
-        for message in reversed(messages):
+        matches: list[tuple[discord.Message, discord.Attachment, Optional[int]]] = []
+        for index in range(len(messages) - 1, -1, -1):
+            message = messages[index]
+            creator_id = self.resolve_audio_creator_id(messages, index)
             for attachment in message.attachments:
                 if not is_audio_attachment(attachment):
                     continue
                 if normalized_query not in attachment.filename.lower():
                     continue
-                matches.append((message, attachment))
+                matches.append((message, attachment, creator_id))
         return matches
+
+    def resolve_audio_creator_id(
+        self,
+        messages: list[discord.Message],
+        index: int,
+    ) -> Optional[int]:
+        message = messages[index]
+        if not message.author.bot:
+            return message.author.id
+
+        for next_index in range(index + 1, min(len(messages), index + 8)):
+            next_message = messages[next_index]
+            caption_match = CREATOR_CAPTION_RE.fullmatch((next_message.content or "").strip())
+            if caption_match:
+                return int(caption_match.group(1))
+
+            has_audio = any(is_audio_attachment(attachment) for attachment in next_message.attachments)
+            if next_message.author.bot and has_audio and not (next_message.content or "").strip():
+                continue
+            if not next_message.attachments and not (next_message.content or "").strip():
+                continue
+            break
+
+        return message.author.id
 
     def build_audio_result_embed(
         self,
         query: str,
-        match: tuple[discord.Message, discord.Attachment],
+        match: tuple[discord.Message, discord.Attachment, Optional[int]],
         index: int,
         total: int,
     ) -> discord.Embed:
-        message, attachment = match
+        message, attachment, creator_id = match
         channel = message.channel
         location_label = "Thread" if isinstance(channel, discord.Thread) else "Channel"
+        creator_value = f"<@{creator_id}>" if creator_id else message.author.mention
         embed = discord.Embed(
             title=attachment.filename,
             description=f"Audio search result for `{query}`",
             color=discord.Color.blurple(),
             timestamp=message.created_at,
         )
-        embed.add_field(name="Creator", value=message.author.mention, inline=True)
+        embed.add_field(name="Creator", value=creator_value, inline=True)
         embed.add_field(name=location_label, value=self.describe_audio_location(message), inline=True)
         embed.add_field(
             name="Posted",
@@ -244,9 +275,9 @@ class MotionXBot(commands.Bot):
 
     def build_audio_result_view(
         self,
-        match: tuple[discord.Message, discord.Attachment],
+        match: tuple[discord.Message, discord.Attachment, Optional[int]],
     ) -> discord.ui.View:
-        message, attachment = match
+        message, attachment, _creator_id = match
         channel = message.channel
         open_label = "Open Thread" if isinstance(channel, discord.Thread) else "Open Message"
         view = discord.ui.View()
@@ -270,7 +301,7 @@ class MotionXBot(commands.Bot):
         self,
         interaction: discord.Interaction,
         query: str,
-        matches: list[tuple[discord.Message, discord.Attachment]],
+        matches: list[tuple[discord.Message, discord.Attachment, Optional[int]]],
     ) -> None:
         total = len(matches)
         first_embed = self.build_audio_result_embed(query, matches[0], 1, total)
@@ -292,7 +323,7 @@ class MotionXBot(commands.Bot):
         self,
         message: discord.Message,
         query: str,
-        matches: list[tuple[discord.Message, discord.Attachment]],
+        matches: list[tuple[discord.Message, discord.Attachment, Optional[int]]],
     ) -> None:
         total = len(matches)
         for index, match in enumerate(matches, start=1):
@@ -309,9 +340,9 @@ class MotionXBot(commands.Bot):
         *,
         include_bots: bool,
         interaction: Optional[discord.Interaction] = None,
-    ) -> list[tuple[discord.Message, discord.Attachment]]:
+    ) -> list[tuple[discord.Message, discord.Attachment, Optional[int]]]:
         normalized_query = query.strip()
-        matches: list[tuple[discord.Message, discord.Attachment]] = []
+        matches: list[tuple[discord.Message, discord.Attachment, Optional[int]]] = []
         last_progress_at = 0.0
 
         if isinstance(source_obj, (discord.TextChannel, discord.Thread)):
