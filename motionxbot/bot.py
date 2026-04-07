@@ -24,6 +24,7 @@ from .transfer import (
     copy_forum_thread,
     copy_thread_to_forum,
     copy_thread_to_channel,
+    filter_messages_for_transfer,
     repost_message,
 )
 
@@ -289,6 +290,7 @@ class MotionXBot(commands.Bot):
                 "**Bot status:** `/botstatus`",
                 "",
                 "Most time fields accept compact durations like `15m`, `2h`, `1d`, or `1h30m`.",
+                "Transfer commands also support an `mp3_only` toggle when you only want MP3 attachments copied.",
             ]
             await self.reply_ephemeral(interaction, "\n".join(lines))
 
@@ -1288,6 +1290,7 @@ class MotionXBot(commands.Bot):
             limit: app_commands.Range[int, 1, HARD_LIMIT],
             before: Optional[str] = None,
             include_bots: bool = False,
+            mp3_only: bool = False,
         ) -> None:
             if interaction.guild is None:
                 await self.reply_ephemeral(interaction, "This command can only be used in a server.")
@@ -1306,6 +1309,7 @@ class MotionXBot(commands.Bot):
                 include_bots=include_bots,
                 on_progress=None,
             )
+            messages = filter_messages_for_transfer(messages, mp3_only)
             if not messages:
                 await interaction.edit_original_response(
                     content="No transferable messages were found. Make sure the bot can read the source channel and its history."
@@ -1316,8 +1320,14 @@ class MotionXBot(commands.Bot):
             assert self.http_session is not None
             for message in messages:
                 try:
-                    await repost_message(target, message, self.http_session)
-                    copied += 1
+                    sent = await repost_message(
+                        target,
+                        message,
+                        self.http_session,
+                        mp3_only=mp3_only,
+                    )
+                    if sent:
+                        copied += 1
                 except Exception as error:  # noqa: BLE001
                     failures.append(f"`{message.id}`: {error}")
                 if copied and copied % PROGRESS_UPDATE_INTERVAL == 0:
@@ -1342,6 +1352,7 @@ class MotionXBot(commands.Bot):
             target: discord.TextChannel,
             before: Optional[str] = None,
             include_bots: bool = True,
+            mp3_only: bool = False,
         ) -> None:
             if interaction.guild is None:
                 await self.reply_ephemeral(interaction, "This command can only be used in a server.")
@@ -1371,6 +1382,7 @@ class MotionXBot(commands.Bot):
                 include_bots=include_bots,
                 on_progress=progress,
             )
+            messages = filter_messages_for_transfer(messages, mp3_only)
             if not messages:
                 await interaction.edit_original_response(
                     content="No transferable messages were found. Make sure the bot can read the source channel and its history."
@@ -1381,8 +1393,14 @@ class MotionXBot(commands.Bot):
             assert self.http_session is not None
             for message in messages:
                 try:
-                    await repost_message(target, message, self.http_session)
-                    copied += 1
+                    sent = await repost_message(
+                        target,
+                        message,
+                        self.http_session,
+                        mp3_only=mp3_only,
+                    )
+                    if sent:
+                        copied += 1
                 except Exception as error:  # noqa: BLE001
                     failures.append(f"`{message.id}`: {error}")
                 if copied and copied % PROGRESS_UPDATE_INTERVAL == 0:
@@ -1406,6 +1424,7 @@ class MotionXBot(commands.Bot):
             source: discord.ForumChannel,
             target: discord.ForumChannel,
             include_bots: bool = True,
+            mp3_only: bool = False,
         ) -> None:
             if interaction.guild is None:
                 await self.reply_ephemeral(interaction, "This command can only be used in a server.")
@@ -1436,8 +1455,16 @@ class MotionXBot(commands.Bot):
             assert self.http_session is not None
             for thread in threads:
                 try:
-                    await copy_forum_thread(source, target, thread, include_bots, self.http_session)
-                    copied += 1
+                    transferred = await copy_forum_thread(
+                        source,
+                        target,
+                        thread,
+                        include_bots,
+                        self.http_session,
+                        mp3_only=mp3_only,
+                    )
+                    if transferred:
+                        copied += 1
                 except Exception as error:  # noqa: BLE001
                     failures.append(f"`{thread.id}` ({thread.name}): {error}")
                 if copied and copied % 5 == 0:
@@ -1464,6 +1491,7 @@ class MotionXBot(commands.Bot):
             target_thread: Optional[discord.Thread] = None,
             target_forum: Optional[discord.ForumChannel] = None,
             include_bots: bool = True,
+            mp3_only: bool = False,
         ) -> None:
             if interaction.guild is None:
                 await self.reply_ephemeral(interaction, "This command can only be used in a server.")
@@ -1501,22 +1529,49 @@ class MotionXBot(commands.Bot):
                     copied = 0
                     threads = await collect_forum_threads(source_forum, None)
                     for thread in threads:
-                        await copy_forum_thread(source_forum, target_forum, thread, include_bots, self.http_session)
-                        copied += 1
+                        transferred = await copy_forum_thread(
+                            source_forum,
+                            target_forum,
+                            thread,
+                            include_bots,
+                            self.http_session,
+                            mp3_only=mp3_only,
+                        )
+                        if transferred:
+                            copied += 1
                     unit_label = "forum post thread(s)"
                     target_label = target_forum.mention
                 elif source_forum is not None and target_thread is not None:
-                    copied = await copy_forum_to_thread(source_forum, target_thread, include_bots, self.http_session)
+                    copied = await copy_forum_to_thread(
+                        source_forum,
+                        target_thread,
+                        include_bots,
+                        self.http_session,
+                        mp3_only=mp3_only,
+                    )
                     unit_label = "message(s)"
                     target_label = target_thread.mention
                 elif source_thread is not None and target_forum is not None:
                     source_parent_forum = source_thread.parent if isinstance(source_thread.parent, discord.ForumChannel) else None
-                    await copy_thread_to_forum(source_thread, target_forum, include_bots, self.http_session, source_parent_forum)
-                    copied = 1
-                    unit_label = "thread"
+                    transferred = await copy_thread_to_forum(
+                        source_thread,
+                        target_forum,
+                        include_bots,
+                        self.http_session,
+                        source_parent_forum,
+                        mp3_only=mp3_only,
+                    )
+                    copied = 1 if transferred else 0
+                    unit_label = "thread(s)"
                     target_label = target_forum.mention
                 else:
-                    copied = await copy_thread_to_channel(source_thread, target_thread, include_bots, self.http_session)
+                    copied = await copy_thread_to_channel(
+                        source_thread,
+                        target_thread,
+                        include_bots,
+                        self.http_session,
+                        mp3_only=mp3_only,
+                    )
                     unit_label = "message(s)"
                     target_label = target_thread.mention
             except Exception as error:  # noqa: BLE001

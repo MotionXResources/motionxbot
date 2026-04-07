@@ -58,6 +58,24 @@ def build_thread_source_label(source_thread: discord.Thread) -> str:
     return f"{parent_label} / {source_thread.name}"
 
 
+def is_mp3_attachment(attachment: discord.Attachment) -> bool:
+    filename = attachment.filename.strip().lower()
+    content_type = (attachment.content_type or "").lower()
+    return filename.endswith(".mp3") or content_type in {"audio/mpeg", "audio/mp3"}
+
+
+def filter_messages_for_transfer(
+    messages: list[discord.Message], mp3_only: bool
+) -> list[discord.Message]:
+    if not mp3_only:
+        return messages
+    return [
+        message
+        for message in messages
+        if any(is_mp3_attachment(attachment) for attachment in message.attachments)
+    ]
+
+
 def is_transferable_message(message: discord.Message, include_bots: bool) -> bool:
     if message.is_system():
         return False
@@ -67,14 +85,25 @@ def is_transferable_message(message: discord.Message, include_bots: bool) -> boo
 
 
 async def build_attachment_batches(
-    session: aiohttp.ClientSession, message: discord.Message, upload_limit_bytes: int
-) -> tuple[list[list[discord.File]], list[str]]:
+    session: aiohttp.ClientSession,
+    message: discord.Message,
+    upload_limit_bytes: int,
+    mp3_only: bool = False,
+) -> tuple[list[list[discord.File]], list[list[str]], list[str]]:
     batches: list[list[discord.File]] = []
+    filename_batches: list[list[str]] = []
     skipped: list[str] = []
     current_batch: list[discord.File] = []
+    current_filenames: list[str] = []
     current_batch_bytes = 0
 
-    for attachment in message.attachments:
+    attachments = [
+        attachment
+        for attachment in message.attachments
+        if not mp3_only or is_mp3_attachment(attachment)
+    ]
+
+    for attachment in attachments:
         if attachment.size > upload_limit_bytes:
             skipped.append(f"{attachment.filename} (file exceeds the upload limit for reposting)")
             continue
@@ -85,7 +114,9 @@ async def build_attachment_batches(
         ):
             if current_batch:
                 batches.append(current_batch)
+                filename_batches.append(current_filenames)
             current_batch = []
+            current_filenames = []
             current_batch_bytes = 0
 
         async with session.get(attachment.url) as response:
@@ -96,11 +127,13 @@ async def build_attachment_batches(
 
         current_batch_bytes += len(payload)
         current_batch.append(discord.File(io.BytesIO(payload), filename=attachment.filename))
+        current_filenames.append(attachment.filename)
 
     if current_batch:
         batches.append(current_batch)
+        filename_batches.append(current_filenames)
 
-    return batches, skipped
+    return batches, filename_batches, skipped
 
 
 async def send_skipped_attachment_notes(
@@ -122,19 +155,23 @@ async def repost_message(
     message: discord.Message,
     session: aiohttp.ClientSession,
     source_label: str | None = None,
-) -> None:
+    mp3_only: bool = False,
+) -> bool:
     del source_label
-    content_chunks = split_content(message.content or "", MAX_CONTENT_LENGTH)
+    content_chunks = split_content("" if mp3_only else message.content or "", MAX_CONTENT_LENGTH)
     upload_limit = getattr(message.guild, "filesize_limit", DEFAULT_UPLOAD_LIMIT_BYTES)
-    file_batches, skipped = await build_attachment_batches(session, message, upload_limit)
+    file_batches, filename_batches, skipped = await build_attachment_batches(
+        session,
+        message,
+        upload_limit,
+        mp3_only=mp3_only,
+    )
     first_file_batch = file_batches.pop(0) if file_batches else []
-    first_filenames = [attachment.filename for attachment in message.attachments[: len(first_file_batch)]]
+    first_filenames = filename_batches.pop(0) if filename_batches else []
 
     if not content_chunks and not first_file_batch:
-        await target_channel.send(
-            f"Unsupported content {build_text_caption(message.author.id)}",
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
+        await send_skipped_attachment_notes(target_channel, skipped)
+        return False
     else:
         first_body = content_chunks.pop(0) if content_chunks else ""
         footer = (
@@ -152,8 +189,7 @@ async def repost_message(
         for chunk in content_chunks:
             await target_channel.send(chunk, allowed_mentions=discord.AllowedMentions.none())
 
-    for batch in file_batches:
-        batch_filenames = [file.filename for file in batch]
+    for batch, batch_filenames in zip(file_batches, filename_batches):
         await target_channel.send(
             build_attachment_caption(message.author.id, batch_filenames),
             files=batch,
@@ -161,6 +197,7 @@ async def repost_message(
         )
 
     await send_skipped_attachment_notes(target_channel, skipped)
+    return True
 
 
 async def collect_messages(
@@ -239,27 +276,33 @@ async def create_forum_post(
     source_thread: discord.Thread,
     starter_message: discord.Message | None,
     session: aiohttp.ClientSession,
+    mp3_only: bool = False,
 ) -> discord.Thread:
     applied_tags = map_forum_tags(source_thread, source_forum, target_forum)
     upload_limit = getattr(target_forum.guild, "filesize_limit", DEFAULT_UPLOAD_LIMIT_BYTES)
 
     if starter_message:
-        starter_chunks = split_content(starter_message.content or "", MAX_CONTENT_LENGTH)
-        file_batches, skipped = await build_attachment_batches(session, starter_message, upload_limit)
+        starter_chunks = split_content("" if mp3_only else starter_message.content or "", MAX_CONTENT_LENGTH)
+        file_batches, filename_batches, skipped = await build_attachment_batches(
+            session,
+            starter_message,
+            upload_limit,
+            mp3_only=mp3_only,
+        )
     else:
         starter_chunks = [
             "*Original starter message was unavailable, so this forum post was recreated from the remaining thread history.*"
         ]
-        file_batches, skipped = [], []
+        file_batches, filename_batches, skipped = [], [], []
 
     first_batch = file_batches.pop(0) if file_batches else []
-    first_filenames = [attachment.filename for attachment in starter_message.attachments[: len(first_batch)]] if starter_message else []
+    first_filenames = filename_batches.pop(0) if filename_batches else []
     first_chunk = starter_chunks.pop(0) if starter_chunks else ""
     first_footer = (
         build_attachment_caption(starter_message.author.id, first_filenames)
         if starter_message and first_batch
         else build_text_caption(starter_message.author.id)
-        if starter_message
+        if starter_message and not mp3_only
         else ""
     )
     first_payload = f"{first_chunk}\n\n{first_footer}" if first_chunk and first_footer else first_chunk or first_footer
@@ -277,9 +320,9 @@ async def create_forum_post(
     for chunk in starter_chunks:
         await new_thread.send(chunk, allowed_mentions=discord.AllowedMentions.none())
 
-    for batch in file_batches:
+    for batch, batch_filenames in zip(file_batches, filename_batches):
         await new_thread.send(
-            build_attachment_caption(starter_message.author.id, [file.filename for file in batch])
+            build_attachment_caption(starter_message.author.id, batch_filenames)
             if starter_message
             else f"{source_thread.name} by @unknown",
             files=batch,
@@ -296,8 +339,16 @@ async def copy_forum_thread(
     source_thread: discord.Thread,
     include_bots: bool,
     session: aiohttp.ClientSession,
-) -> None:
-    await copy_thread_to_forum(source_thread, target_forum, include_bots, session, source_forum)
+    mp3_only: bool = False,
+) -> bool:
+    return await copy_thread_to_forum(
+        source_thread,
+        target_forum,
+        include_bots,
+        session,
+        source_forum,
+        mp3_only,
+    )
 
 
 async def copy_thread_to_forum(
@@ -306,7 +357,8 @@ async def copy_thread_to_forum(
     include_bots: bool,
     session: aiohttp.ClientSession,
     source_forum: discord.ForumChannel | None = None,
-) -> None:
+    mp3_only: bool = False,
+) -> bool:
     messages = await collect_messages(
         source_thread,
         all_messages=True,
@@ -315,6 +367,9 @@ async def copy_thread_to_forum(
         include_bots=include_bots,
         on_progress=None,
     )
+    messages = filter_messages_for_transfer(messages, mp3_only)
+    if not messages:
+        return False
 
     starter_message = messages.pop(0) if messages else None
     created_thread = await create_forum_post(
@@ -323,16 +378,24 @@ async def copy_thread_to_forum(
         source_thread,
         starter_message,
         session,
+        mp3_only=mp3_only,
     )
     source_label = build_thread_source_label(source_thread)
 
     for message in messages:
-        await repost_message(created_thread, message, session, source_label)
+        await repost_message(
+            created_thread,
+            message,
+            session,
+            source_label,
+            mp3_only=mp3_only,
+        )
 
     kwargs = {"archived": source_thread.archived, "locked": source_thread.locked}
     if getattr(source_thread, "applied_tags", None):
         kwargs["applied_tags"] = map_forum_tags(source_thread, source_forum, target_forum)
     await created_thread.edit(**kwargs)
+    return True
 
 
 async def copy_thread_to_channel(
@@ -340,6 +403,8 @@ async def copy_thread_to_channel(
     target_channel: discord.abc.Messageable,
     include_bots: bool,
     session: aiohttp.ClientSession,
+    mp3_only: bool = False,
+    thread_label: str | None = None,
 ) -> int:
     messages = await collect_messages(
         source_thread,
@@ -349,11 +414,27 @@ async def copy_thread_to_channel(
         include_bots=include_bots,
         on_progress=None,
     )
+    messages = filter_messages_for_transfer(messages, mp3_only)
+    if not messages:
+        return 0
+
     source_label = build_thread_source_label(source_thread)
     copied = 0
+    if thread_label:
+        await target_channel.send(
+            thread_label,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
     for message in messages:
-        await repost_message(target_channel, message, session, source_label)
-        copied += 1
+        sent = await repost_message(
+            target_channel,
+            message,
+            session,
+            source_label,
+            mp3_only=mp3_only,
+        )
+        if sent:
+            copied += 1
     return copied
 
 
@@ -362,16 +443,20 @@ async def copy_forum_to_thread(
     target_channel: discord.abc.Messageable,
     include_bots: bool,
     session: aiohttp.ClientSession,
+    mp3_only: bool = False,
 ) -> int:
     threads = await collect_forum_threads(source_forum, None)
     copied = 0
 
     for thread in threads:
-        await target_channel.send(
-            f"**Thread:** {thread.name}",
-            allowed_mentions=discord.AllowedMentions.none(),
+        copied += await copy_thread_to_channel(
+            thread,
+            target_channel,
+            include_bots,
+            session,
+            mp3_only=mp3_only,
+            thread_label=f"**Thread:** {thread.name}",
         )
-        copied += await copy_thread_to_channel(thread, target_channel, include_bots, session)
 
     return copied
 
