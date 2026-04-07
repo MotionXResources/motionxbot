@@ -62,7 +62,8 @@ The bot now syncs slash commands on startup. If `DISCORD_GUILD_ID` is set, it sy
 - Data is stored in `data/store.json`.
 - `/transfer` reposts messages and files with short attribution. It does not impersonate the original authors.
 - `/transfer forum` recreates forum posts in the target forum and then copies the thread history into them.
-- `/transfer thread` copies one specific thread to a text channel, another thread, or a forum.
+- `/transfer thread` now accepts either a forum or a thread as the source, and either a forum or a thread as the target.
+- Thread/file attribution is kept short, for example `("voice-note.mp3" by @original_creator)`.
 - Forum tags only carry across automatically when the target forum already has matching tag names.
 - This bot requires the `Message Content` and `Server Members` privileged intents in the Discord Developer Portal.
 

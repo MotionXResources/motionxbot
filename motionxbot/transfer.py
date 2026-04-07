@@ -211,9 +211,12 @@ async def collect_forum_threads(
 
 def map_forum_tags(
     source_thread: discord.Thread,
-    source_forum: discord.ForumChannel,
+    source_forum: discord.ForumChannel | None,
     target_forum: discord.ForumChannel,
 ) -> list[discord.ForumTag]:
+    if source_forum is None:
+        return []
+
     source_tags = {tag.id: tag.name.strip().lower() for tag in source_forum.available_tags}
     target_tags = {tag.name.strip().lower(): tag for tag in target_forum.available_tags}
     tag_ids = getattr(source_thread, "applied_tags", [])
@@ -232,7 +235,7 @@ def map_forum_tags(
 
 async def create_forum_post(
     target_forum: discord.ForumChannel,
-    source_forum: discord.ForumChannel,
+    source_forum: discord.ForumChannel | None,
     source_thread: discord.Thread,
     starter_message: discord.Message | None,
     session: aiohttp.ClientSession,
@@ -294,6 +297,16 @@ async def copy_forum_thread(
     include_bots: bool,
     session: aiohttp.ClientSession,
 ) -> None:
+    await copy_thread_to_forum(source_thread, target_forum, include_bots, session, source_forum)
+
+
+async def copy_thread_to_forum(
+    source_thread: discord.Thread,
+    target_forum: discord.ForumChannel,
+    include_bots: bool,
+    session: aiohttp.ClientSession,
+    source_forum: discord.ForumChannel | None = None,
+) -> None:
     messages = await collect_messages(
         source_thread,
         all_messages=True,
@@ -341,6 +354,25 @@ async def copy_thread_to_channel(
     for message in messages:
         await repost_message(target_channel, message, session, source_label)
         copied += 1
+    return copied
+
+
+async def copy_forum_to_thread(
+    source_forum: discord.ForumChannel,
+    target_channel: discord.abc.Messageable,
+    include_bots: bool,
+    session: aiohttp.ClientSession,
+) -> int:
+    threads = await collect_forum_threads(source_forum, None)
+    copied = 0
+
+    for thread in threads:
+        await target_channel.send(
+            f"**Thread:** {thread.name}",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        copied += await copy_thread_to_channel(thread, target_channel, include_bots, session)
+
     return copied
 
 

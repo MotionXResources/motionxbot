@@ -20,7 +20,9 @@ from .transfer import (
     build_summary,
     collect_forum_threads,
     collect_messages,
+    copy_forum_to_thread,
     copy_forum_thread,
+    copy_thread_to_forum,
     copy_thread_to_channel,
     repost_message,
 )
@@ -1454,11 +1456,11 @@ class MotionXBot(commands.Bot):
                 )
             )
 
-        @transfer_group.command(name="thread", description="Copy one specific thread into a channel, thread, or forum.")
+        @transfer_group.command(name="thread", description="Copy any forum or thread into any forum or thread.")
         async def transfer_thread(
             interaction: discord.Interaction,
-            source: discord.Thread,
-            target_channel: Optional[discord.TextChannel] = None,
+            source_thread: Optional[discord.Thread] = None,
+            source_forum: Optional[discord.ForumChannel] = None,
             target_thread: Optional[discord.Thread] = None,
             target_forum: Optional[discord.ForumChannel] = None,
             include_bots: bool = True,
@@ -1469,12 +1471,25 @@ class MotionXBot(commands.Bot):
             if not await self.ensure_permissions(interaction, "`/transfer`", manage_messages=True):
                 return
 
-            selected_targets = [item for item in (target_channel, target_thread, target_forum) if item is not None]
+            selected_sources = [item for item in (source_thread, source_forum) if item is not None]
+            selected_targets = [item for item in (target_thread, target_forum) if item is not None]
+            if len(selected_sources) != 1:
+                await self.reply_ephemeral(
+                    interaction,
+                    "Choose exactly one source: either a forum or a thread.",
+                )
+                return
             if len(selected_targets) != 1:
                 await self.reply_ephemeral(
                     interaction,
-                    "Choose exactly one target: a text channel, a thread, or a forum.",
+                    "Choose exactly one target: either a forum or a thread.",
                 )
+                return
+
+            source_obj = selected_sources[0]
+            target_obj = selected_targets[0]
+            if source_obj.id == target_obj.id:
+                await self.reply_ephemeral(interaction, "Source and target must be different.")
                 return
 
             await self.defer_ephemeral(interaction)
@@ -1482,31 +1497,38 @@ class MotionXBot(commands.Bot):
             failures: list[str] = []
 
             try:
-                if target_forum is not None:
-                    if not isinstance(source.parent, discord.ForumChannel):
-                        await interaction.edit_original_response(
-                            content="That source thread is not inside a forum, so it cannot be recreated as a forum post."
-                        )
-                        return
-                    await copy_forum_thread(source.parent, target_forum, source, include_bots, self.http_session)
+                if source_forum is not None and target_forum is not None:
+                    copied = 0
+                    threads = await collect_forum_threads(source_forum, None)
+                    for thread in threads:
+                        await copy_forum_thread(source_forum, target_forum, thread, include_bots, self.http_session)
+                        copied += 1
+                    unit_label = "forum post thread(s)"
+                    target_label = target_forum.mention
+                elif source_forum is not None and target_thread is not None:
+                    copied = await copy_forum_to_thread(source_forum, target_thread, include_bots, self.http_session)
+                    unit_label = "message(s)"
+                    target_label = target_thread.mention
+                elif source_thread is not None and target_forum is not None:
+                    source_parent_forum = source_thread.parent if isinstance(source_thread.parent, discord.ForumChannel) else None
+                    await copy_thread_to_forum(source_thread, target_forum, include_bots, self.http_session, source_parent_forum)
                     copied = 1
                     unit_label = "thread"
                     target_label = target_forum.mention
                 else:
-                    destination = target_thread or target_channel
-                    copied = await copy_thread_to_channel(source, destination, include_bots, self.http_session)
+                    copied = await copy_thread_to_channel(source_thread, target_thread, include_bots, self.http_session)
                     unit_label = "message(s)"
-                    target_label = destination.mention
+                    target_label = target_thread.mention
             except Exception as error:  # noqa: BLE001
                 failures.append(str(error))
                 copied = 0
                 unit_label = "message(s)"
-                target_label = selected_targets[0].mention
+                target_label = target_obj.mention
 
             await interaction.edit_original_response(
                 content="\n".join(
                     [
-                        f"Copied {copied} {unit_label} from {source.mention} to {target_label}.",
+                        f"Copied {copied} {unit_label} from {source_obj.mention} to {target_label}.",
                         f"Failed: {len(failures)}",
                         *failures[:10],
                     ]
