@@ -64,6 +64,10 @@ def build_text_caption(author_id: int) -> str:
     return f"by <@{author_id}>"
 
 
+def build_creator_caption(author_id: int) -> str:
+    return f"created by <@{author_id}>"
+
+
 def build_thread_source_label(source_thread: discord.Thread) -> str:
     parent_label = str(source_thread.parent) if source_thread.parent else "#forum"
     return f"{parent_label} / {source_thread.name}"
@@ -227,7 +231,12 @@ async def repost_message(
                 allowed_mentions=discord.AllowedMentions.none(),
             )
 
-    if not mp3_only:
+    if mp3_only:
+        await target_channel.send(
+            build_creator_caption(message.author.id),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+    else:
         await send_skipped_attachment_notes(target_channel, skipped)
     return True
 
@@ -370,7 +379,12 @@ async def create_forum_post(
                 allowed_mentions=discord.AllowedMentions.none(),
             )
 
-    if not mp3_only:
+    if mp3_only and starter_message and first_batch:
+        await new_thread.send(
+            build_creator_caption(starter_message.author.id),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+    elif not mp3_only:
         await send_skipped_attachment_notes(new_thread, skipped)
     return new_thread
 
