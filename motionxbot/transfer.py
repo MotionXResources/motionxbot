@@ -170,8 +170,15 @@ async def repost_message(
     first_filenames = filename_batches.pop(0) if filename_batches else []
 
     if not content_chunks and not first_file_batch:
-        await send_skipped_attachment_notes(target_channel, skipped)
+        if not mp3_only:
+            await send_skipped_attachment_notes(target_channel, skipped)
         return False
+
+    if mp3_only:
+        await target_channel.send(
+            files=first_file_batch,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
     else:
         first_body = content_chunks.pop(0) if content_chunks else ""
         footer = (
@@ -190,13 +197,21 @@ async def repost_message(
             await target_channel.send(chunk, allowed_mentions=discord.AllowedMentions.none())
 
     for batch, batch_filenames in zip(file_batches, filename_batches):
-        await target_channel.send(
-            build_attachment_caption(message.author.id, batch_filenames),
-            files=batch,
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
+        if mp3_only:
+            del batch_filenames
+            await target_channel.send(
+                files=batch,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        else:
+            await target_channel.send(
+                build_attachment_caption(message.author.id, batch_filenames),
+                files=batch,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
 
-    await send_skipped_attachment_notes(target_channel, skipped)
+    if not mp3_only:
+        await send_skipped_attachment_notes(target_channel, skipped)
     return True
 
 
@@ -306,11 +321,13 @@ async def create_forum_post(
         else ""
     )
     first_payload = f"{first_chunk}\n\n{first_footer}" if first_chunk and first_footer else first_chunk or first_footer
+    if mp3_only and first_batch and not first_payload:
+        first_payload = None
     created = await target_forum.create_thread(
         name=(source_thread.name or f"copied-thread-{source_thread.id}")[:100],
         auto_archive_duration=source_thread.auto_archive_duration,
         slowmode_delay=getattr(source_thread, "slowmode_delay", 0) or None,
-        content=first_payload or "*No text content.*",
+        content=first_payload or ("*No text content.*" if not mp3_only else None),
         files=first_batch,
         applied_tags=applied_tags,
         allowed_mentions=discord.AllowedMentions.none(),
@@ -321,15 +338,23 @@ async def create_forum_post(
         await new_thread.send(chunk, allowed_mentions=discord.AllowedMentions.none())
 
     for batch, batch_filenames in zip(file_batches, filename_batches):
-        await new_thread.send(
-            build_attachment_caption(starter_message.author.id, batch_filenames)
-            if starter_message
-            else f"{source_thread.name} by @unknown",
-            files=batch,
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
+        if mp3_only:
+            del batch_filenames
+            await new_thread.send(
+                files=batch,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        else:
+            await new_thread.send(
+                build_attachment_caption(starter_message.author.id, batch_filenames)
+                if starter_message
+                else f"{source_thread.name} by @unknown",
+                files=batch,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
 
-    await send_skipped_attachment_notes(new_thread, skipped)
+    if not mp3_only:
+        await send_skipped_attachment_notes(new_thread, skipped)
     return new_thread
 
 
@@ -420,7 +445,7 @@ async def copy_thread_to_channel(
 
     source_label = build_thread_source_label(source_thread)
     copied = 0
-    if thread_label:
+    if thread_label and not mp3_only:
         await target_channel.send(
             thread_label,
             allowed_mentions=discord.AllowedMentions.none(),
