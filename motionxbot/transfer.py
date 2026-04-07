@@ -45,12 +45,12 @@ def split_text_by_limit(text: str) -> list[str]:
 
 
 def build_attachment_caption(author_id: int, filenames: list[str]) -> str:
-    quoted = ", ".join(f'"{name}"' for name in filenames)
-    return f"({quoted} by <@{author_id}>)"
+    names = ", ".join(filenames)
+    return f"{names} by <@{author_id}>"
 
 
 def build_text_caption(author_id: int) -> str:
-    return f"(by <@{author_id}>)"
+    return f"by <@{author_id}>"
 
 
 def build_thread_source_label(source_thread: discord.Thread) -> str:
@@ -132,7 +132,7 @@ async def repost_message(
 
     if not content_chunks and not first_file_batch:
         await target_channel.send(
-            f"*Unsupported content* {build_text_caption(message.author.id)}",
+            f"Unsupported content {build_text_caption(message.author.id)}",
             allowed_mentions=discord.AllowedMentions.none(),
         )
     else:
@@ -281,7 +281,7 @@ async def create_forum_post(
         await new_thread.send(
             build_attachment_caption(starter_message.author.id, [file.filename for file in batch])
             if starter_message
-            else f'("{source_thread.name}" by @unknown)',
+            else f"{source_thread.name} by @unknown",
             files=batch,
             allowed_mentions=discord.AllowedMentions.none(),
         )
