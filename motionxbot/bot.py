@@ -183,6 +183,38 @@ class MotionXBot(commands.Bot):
         if not interaction.response.is_done():
             await interaction.response.defer(ephemeral=True)
 
+    def extract_discord_id(self, raw_value: str) -> Optional[int]:
+        stripped = raw_value.strip()
+        if stripped.isdigit():
+            return int(stripped)
+
+        digit_groups = re.findall(r"\d+", stripped)
+        return int(digit_groups[-1]) if digit_groups else None
+
+    async def resolve_thread_reference(
+        self,
+        guild: discord.Guild,
+        raw_value: str,
+    ) -> Optional[discord.Thread]:
+        thread_id = self.extract_discord_id(raw_value.strip())
+        if thread_id is None:
+            return None
+
+        thread = guild.get_thread(thread_id)
+        if isinstance(thread, discord.Thread):
+            return thread
+
+        channel = guild.get_channel(thread_id)
+        if isinstance(channel, discord.Thread):
+            return channel
+
+        try:
+            channel = await self.fetch_channel(thread_id)
+        except discord.HTTPException:
+            return None
+
+        return channel if isinstance(channel, discord.Thread) else None
+
     def get_default_audio_search_source(
         self, channel: Any
     ) -> Optional[discord.abc.Messageable]:
@@ -1819,8 +1851,10 @@ class MotionXBot(commands.Bot):
         async def transfer_thread(
             interaction: discord.Interaction,
             source_thread: Optional[discord.Thread] = None,
+            source_thread_id: Optional[str] = None,
             source_forum: Optional[discord.ForumChannel] = None,
             target_thread: Optional[discord.Thread] = None,
+            target_thread_id: Optional[str] = None,
             target_forum: Optional[discord.ForumChannel] = None,
             include_bots: bool = True,
             mp3_only: bool = False,
@@ -1831,18 +1865,41 @@ class MotionXBot(commands.Bot):
             if not await self.ensure_permissions(interaction, "`/transfer`", manage_messages=True):
                 return
 
-            selected_sources = [item for item in (source_thread, source_forum) if item is not None]
-            selected_targets = [item for item in (target_thread, target_forum) if item is not None]
+            source_thread_from_id = None
+            target_thread_from_id = None
+            if source_thread_id:
+                source_thread_from_id = await self.resolve_thread_reference(interaction.guild, source_thread_id)
+                if source_thread_from_id is None:
+                    await self.reply_ephemeral(
+                        interaction,
+                        "I couldn't resolve that source thread ID or link.",
+                    )
+                    return
+            if target_thread_id:
+                target_thread_from_id = await self.resolve_thread_reference(interaction.guild, target_thread_id)
+                if target_thread_from_id is None:
+                    await self.reply_ephemeral(
+                        interaction,
+                        "I couldn't resolve that target thread ID or link.",
+                    )
+                    return
+
+            selected_sources = [
+                item for item in (source_thread, source_thread_from_id, source_forum) if item is not None
+            ]
+            selected_targets = [
+                item for item in (target_thread, target_thread_from_id, target_forum) if item is not None
+            ]
             if len(selected_sources) != 1:
                 await self.reply_ephemeral(
                     interaction,
-                    "Choose exactly one source: either a forum or a thread.",
+                    "Choose exactly one source: either a forum, a thread, or a thread ID/link.",
                 )
                 return
             if len(selected_targets) != 1:
                 await self.reply_ephemeral(
                     interaction,
-                    "Choose exactly one target: either a forum or a thread.",
+                    "Choose exactly one target: either a forum, a thread, or a thread ID/link.",
                 )
                 return
 
@@ -1857,6 +1914,9 @@ class MotionXBot(commands.Bot):
             failures: list[str] = []
 
             try:
+                resolved_source_thread = source_thread or source_thread_from_id
+                resolved_target_thread = target_thread or target_thread_from_id
+
                 if source_forum is not None and target_forum is not None:
                     copied = 0
                     threads = await collect_forum_threads(source_forum, None)
@@ -1882,11 +1942,15 @@ class MotionXBot(commands.Bot):
                         mp3_only=mp3_only,
                     )
                     unit_label = "message(s)"
-                    target_label = target_thread.mention
-                elif source_thread is not None and target_forum is not None:
-                    source_parent_forum = source_thread.parent if isinstance(source_thread.parent, discord.ForumChannel) else None
+                    target_label = resolved_target_thread.mention
+                elif resolved_source_thread is not None and target_forum is not None:
+                    source_parent_forum = (
+                        resolved_source_thread.parent
+                        if isinstance(resolved_source_thread.parent, discord.ForumChannel)
+                        else None
+                    )
                     transferred = await copy_thread_to_forum(
-                        source_thread,
+                        resolved_source_thread,
                         target_forum,
                         include_bots,
                         self.http_session,
@@ -1898,14 +1962,14 @@ class MotionXBot(commands.Bot):
                     target_label = target_forum.mention
                 else:
                     copied = await copy_thread_to_channel(
-                        source_thread,
-                        target_thread,
+                        resolved_source_thread,
+                        resolved_target_thread,
                         include_bots,
                         self.http_session,
                         mp3_only=mp3_only,
                     )
                     unit_label = "message(s)"
-                    target_label = target_thread.mention
+                    target_label = resolved_target_thread.mention
             except Exception as error:  # noqa: BLE001
                 failures.append(str(error))
                 copied = 0

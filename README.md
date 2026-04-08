@@ -67,6 +67,7 @@ The bot now syncs slash commands on startup. If `DISCORD_GUILD_ID` is set, it sy
 - `mtxaudios <query>` runs the same audio search against the channel or thread where you type it.
 - `/transfer forum` recreates forum posts in the target forum and then copies the thread history into them.
 - `/transfer thread` now accepts either a forum or a thread as the source, and either a forum or a thread as the target.
+- If Discord's thread picker does not show a forum post you need, `/transfer thread` also accepts a raw thread ID or a copied Discord thread link for both source and target.
 - Transfer commands support an `mp3_only` option when you want to copy only MP3 attachments, with no pasted caption text.
 - Thread/file attribution is kept short, for example `voice-note.mp3 by @original_creator`.
 - Forum tags only carry across automatically when the target forum already has matching tag names.
