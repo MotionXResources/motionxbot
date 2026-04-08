@@ -594,7 +594,7 @@ class MotionXBot(commands.Bot):
                 "**Bot status:** `/botstatus`",
                 "",
                 "Most time fields accept compact durations like `15m`, `2h`, `1d`, or `1h30m`.",
-                "Transfer commands also support an `mp3_only` toggle when you only want MP3 attachments copied.",
+                "Transfer commands also support `mp3_only` and `audio_only` toggles for file-only audio copies.",
             ]
             await self.reply_ephemeral(interaction, "\n".join(lines))
 
@@ -1655,6 +1655,7 @@ class MotionXBot(commands.Bot):
             before: Optional[str] = None,
             include_bots: bool = False,
             mp3_only: bool = False,
+            audio_only: bool = False,
         ) -> None:
             if interaction.guild is None:
                 await self.reply_ephemeral(interaction, "This command can only be used in a server.")
@@ -1663,6 +1664,9 @@ class MotionXBot(commands.Bot):
                 return
             if source.id == target.id:
                 await self.reply_ephemeral(interaction, "Source and target channels must be different.")
+                return
+            if mp3_only and audio_only:
+                await self.reply_ephemeral(interaction, "Choose either `mp3_only` or `audio_only`, not both.")
                 return
             await self.defer_ephemeral(interaction)
             messages = await collect_messages(
@@ -1673,7 +1677,7 @@ class MotionXBot(commands.Bot):
                 include_bots=include_bots,
                 on_progress=None,
             )
-            messages = filter_messages_for_transfer(messages, mp3_only)
+            messages = filter_messages_for_transfer(messages, mp3_only, audio_only)
             if not messages:
                 await interaction.edit_original_response(
                     content="No transferable messages were found. Make sure the bot can read the source channel and its history."
@@ -1689,6 +1693,7 @@ class MotionXBot(commands.Bot):
                         message,
                         self.http_session,
                         mp3_only=mp3_only,
+                        audio_only=audio_only,
                     )
                     if sent:
                         copied += 1
@@ -1717,6 +1722,7 @@ class MotionXBot(commands.Bot):
             before: Optional[str] = None,
             include_bots: bool = True,
             mp3_only: bool = False,
+            audio_only: bool = False,
         ) -> None:
             if interaction.guild is None:
                 await self.reply_ephemeral(interaction, "This command can only be used in a server.")
@@ -1725,6 +1731,9 @@ class MotionXBot(commands.Bot):
                 return
             if source.id == target.id:
                 await self.reply_ephemeral(interaction, "Source and target channels must be different.")
+                return
+            if mp3_only and audio_only:
+                await self.reply_ephemeral(interaction, "Choose either `mp3_only` or `audio_only`, not both.")
                 return
             await self.defer_ephemeral(interaction)
             last_progress_at = 0.0
@@ -1746,7 +1755,7 @@ class MotionXBot(commands.Bot):
                 include_bots=include_bots,
                 on_progress=progress,
             )
-            messages = filter_messages_for_transfer(messages, mp3_only)
+            messages = filter_messages_for_transfer(messages, mp3_only, audio_only)
             if not messages:
                 await interaction.edit_original_response(
                     content="No transferable messages were found. Make sure the bot can read the source channel and its history."
@@ -1762,6 +1771,7 @@ class MotionXBot(commands.Bot):
                         message,
                         self.http_session,
                         mp3_only=mp3_only,
+                        audio_only=audio_only,
                     )
                     if sent:
                         copied += 1
@@ -1789,6 +1799,7 @@ class MotionXBot(commands.Bot):
             target: discord.ForumChannel,
             include_bots: bool = True,
             mp3_only: bool = False,
+            audio_only: bool = False,
         ) -> None:
             if interaction.guild is None:
                 await self.reply_ephemeral(interaction, "This command can only be used in a server.")
@@ -1797,6 +1808,9 @@ class MotionXBot(commands.Bot):
                 return
             if source.id == target.id:
                 await self.reply_ephemeral(interaction, "Source and target channels must be different.")
+                return
+            if mp3_only and audio_only:
+                await self.reply_ephemeral(interaction, "Choose either `mp3_only` or `audio_only`, not both.")
                 return
             await self.defer_ephemeral(interaction)
             last_progress_at = 0.0
@@ -1826,6 +1840,7 @@ class MotionXBot(commands.Bot):
                         include_bots,
                         self.http_session,
                         mp3_only=mp3_only,
+                        audio_only=audio_only,
                     )
                     if transferred:
                         copied += 1
@@ -1858,11 +1873,15 @@ class MotionXBot(commands.Bot):
             target_forum: Optional[discord.ForumChannel] = None,
             include_bots: bool = True,
             mp3_only: bool = False,
+            audio_only: bool = False,
         ) -> None:
             if interaction.guild is None:
                 await self.reply_ephemeral(interaction, "This command can only be used in a server.")
                 return
             if not await self.ensure_permissions(interaction, "`/transfer`", manage_messages=True):
+                return
+            if mp3_only and audio_only:
+                await self.reply_ephemeral(interaction, "Choose either `mp3_only` or `audio_only`, not both.")
                 return
 
             source_thread_from_id = None
@@ -1928,18 +1947,20 @@ class MotionXBot(commands.Bot):
                             include_bots,
                             self.http_session,
                             mp3_only=mp3_only,
+                            audio_only=audio_only,
                         )
                         if transferred:
                             copied += 1
                     unit_label = "forum post thread(s)"
                     target_label = target_forum.mention
-                elif source_forum is not None and target_thread is not None:
+                elif source_forum is not None and resolved_target_thread is not None:
                     copied = await copy_forum_to_thread(
                         source_forum,
-                        target_thread,
+                        resolved_target_thread,
                         include_bots,
                         self.http_session,
                         mp3_only=mp3_only,
+                        audio_only=audio_only,
                     )
                     unit_label = "message(s)"
                     target_label = resolved_target_thread.mention
@@ -1956,6 +1977,7 @@ class MotionXBot(commands.Bot):
                         self.http_session,
                         source_parent_forum,
                         mp3_only=mp3_only,
+                        audio_only=audio_only,
                     )
                     copied = 1 if transferred else 0
                     unit_label = "thread(s)"
@@ -1967,6 +1989,7 @@ class MotionXBot(commands.Bot):
                         include_bots,
                         self.http_session,
                         mp3_only=mp3_only,
+                        audio_only=audio_only,
                     )
                     unit_label = "message(s)"
                     target_label = resolved_target_thread.mention

@@ -85,15 +85,31 @@ def is_mp3_attachment(attachment: discord.Attachment) -> bool:
     return filename.endswith(".mp3") or content_type in {"audio/mpeg", "audio/mp3"}
 
 
+def is_audio_only_transfer(mp3_only: bool, audio_only: bool) -> bool:
+    return mp3_only or audio_only
+
+
+def matches_transfer_filter(
+    attachment: discord.Attachment,
+    mp3_only: bool,
+    audio_only: bool,
+) -> bool:
+    if mp3_only:
+        return is_mp3_attachment(attachment)
+    if audio_only:
+        return is_audio_attachment(attachment)
+    return True
+
+
 def filter_messages_for_transfer(
-    messages: list[discord.Message], mp3_only: bool
+    messages: list[discord.Message], mp3_only: bool, audio_only: bool = False
 ) -> list[discord.Message]:
-    if not mp3_only:
+    if not is_audio_only_transfer(mp3_only, audio_only):
         return messages
     return [
         message
         for message in messages
-        if any(is_mp3_attachment(attachment) for attachment in message.attachments)
+        if any(matches_transfer_filter(attachment, mp3_only, audio_only) for attachment in message.attachments)
     ]
 
 
@@ -110,6 +126,7 @@ async def build_attachment_batches(
     message: discord.Message,
     upload_limit_bytes: int,
     mp3_only: bool = False,
+    audio_only: bool = False,
 ) -> tuple[list[list[discord.File]], list[list[str]], list[str]]:
     batches: list[list[discord.File]] = []
     filename_batches: list[list[str]] = []
@@ -121,7 +138,7 @@ async def build_attachment_batches(
     attachments = [
         attachment
         for attachment in message.attachments
-        if not mp3_only or is_mp3_attachment(attachment)
+        if matches_transfer_filter(attachment, mp3_only, audio_only)
     ]
 
     for attachment in attachments:
@@ -177,25 +194,28 @@ async def repost_message(
     session: aiohttp.ClientSession,
     source_label: str | None = None,
     mp3_only: bool = False,
+    audio_only: bool = False,
 ) -> bool:
     del source_label
-    content_chunks = split_content("" if mp3_only else message.content or "", MAX_CONTENT_LENGTH)
+    audio_transfer_only = is_audio_only_transfer(mp3_only, audio_only)
+    content_chunks = split_content("" if audio_transfer_only else message.content or "", MAX_CONTENT_LENGTH)
     upload_limit = getattr(message.guild, "filesize_limit", DEFAULT_UPLOAD_LIMIT_BYTES)
     file_batches, filename_batches, skipped = await build_attachment_batches(
         session,
         message,
         upload_limit,
         mp3_only=mp3_only,
+        audio_only=audio_only,
     )
     first_file_batch = file_batches.pop(0) if file_batches else []
     first_filenames = filename_batches.pop(0) if filename_batches else []
 
     if not content_chunks and not first_file_batch:
-        if not mp3_only:
+        if not audio_transfer_only:
             await send_skipped_attachment_notes(target_channel, skipped)
         return False
 
-    if mp3_only:
+    if audio_transfer_only:
         await target_channel.send(
             files=first_file_batch,
             allowed_mentions=discord.AllowedMentions.none(),
@@ -218,7 +238,7 @@ async def repost_message(
             await target_channel.send(chunk, allowed_mentions=discord.AllowedMentions.none())
 
     for batch, batch_filenames in zip(file_batches, filename_batches):
-        if mp3_only:
+        if audio_transfer_only:
             del batch_filenames
             await target_channel.send(
                 files=batch,
@@ -231,7 +251,7 @@ async def repost_message(
                 allowed_mentions=discord.AllowedMentions.none(),
             )
 
-    if mp3_only:
+    if audio_transfer_only:
         await target_channel.send(
             build_creator_caption(message.author.id),
             allowed_mentions=discord.AllowedMentions.none(),
@@ -318,17 +338,20 @@ async def create_forum_post(
     starter_message: discord.Message | None,
     session: aiohttp.ClientSession,
     mp3_only: bool = False,
+    audio_only: bool = False,
 ) -> discord.Thread:
+    audio_transfer_only = is_audio_only_transfer(mp3_only, audio_only)
     applied_tags = map_forum_tags(source_thread, source_forum, target_forum)
     upload_limit = getattr(target_forum.guild, "filesize_limit", DEFAULT_UPLOAD_LIMIT_BYTES)
 
     if starter_message:
-        starter_chunks = split_content("" if mp3_only else starter_message.content or "", MAX_CONTENT_LENGTH)
+        starter_chunks = split_content("" if audio_transfer_only else starter_message.content or "", MAX_CONTENT_LENGTH)
         file_batches, filename_batches, skipped = await build_attachment_batches(
             session,
             starter_message,
             upload_limit,
             mp3_only=mp3_only,
+            audio_only=audio_only,
         )
     else:
         starter_chunks = [
@@ -343,17 +366,17 @@ async def create_forum_post(
         build_attachment_caption(starter_message.author.id, first_filenames)
         if starter_message and first_batch
         else build_text_caption(starter_message.author.id)
-        if starter_message and not mp3_only
+        if starter_message and not audio_transfer_only
         else ""
     )
     first_payload = f"{first_chunk}\n\n{first_footer}" if first_chunk and first_footer else first_chunk or first_footer
-    if mp3_only and first_batch and not first_payload:
+    if audio_transfer_only and first_batch and not first_payload:
         first_payload = None
     created = await target_forum.create_thread(
         name=(source_thread.name or f"copied-thread-{source_thread.id}")[:100],
         auto_archive_duration=source_thread.auto_archive_duration,
         slowmode_delay=getattr(source_thread, "slowmode_delay", 0) or None,
-        content=first_payload or ("*No text content.*" if not mp3_only else None),
+        content=first_payload or ("*No text content.*" if not audio_transfer_only else None),
         files=first_batch,
         applied_tags=applied_tags,
         allowed_mentions=discord.AllowedMentions.none(),
@@ -364,7 +387,7 @@ async def create_forum_post(
         await new_thread.send(chunk, allowed_mentions=discord.AllowedMentions.none())
 
     for batch, batch_filenames in zip(file_batches, filename_batches):
-        if mp3_only:
+        if audio_transfer_only:
             del batch_filenames
             await new_thread.send(
                 files=batch,
@@ -379,12 +402,12 @@ async def create_forum_post(
                 allowed_mentions=discord.AllowedMentions.none(),
             )
 
-    if mp3_only and starter_message and first_batch:
+    if audio_transfer_only and starter_message and first_batch:
         await new_thread.send(
             build_creator_caption(starter_message.author.id),
             allowed_mentions=discord.AllowedMentions.none(),
         )
-    elif not mp3_only:
+    elif not audio_transfer_only:
         await send_skipped_attachment_notes(new_thread, skipped)
     return new_thread
 
@@ -396,6 +419,7 @@ async def copy_forum_thread(
     include_bots: bool,
     session: aiohttp.ClientSession,
     mp3_only: bool = False,
+    audio_only: bool = False,
 ) -> bool:
     return await copy_thread_to_forum(
         source_thread,
@@ -404,6 +428,7 @@ async def copy_forum_thread(
         session,
         source_forum,
         mp3_only,
+        audio_only,
     )
 
 
@@ -414,6 +439,7 @@ async def copy_thread_to_forum(
     session: aiohttp.ClientSession,
     source_forum: discord.ForumChannel | None = None,
     mp3_only: bool = False,
+    audio_only: bool = False,
 ) -> bool:
     messages = await collect_messages(
         source_thread,
@@ -423,7 +449,7 @@ async def copy_thread_to_forum(
         include_bots=include_bots,
         on_progress=None,
     )
-    messages = filter_messages_for_transfer(messages, mp3_only)
+    messages = filter_messages_for_transfer(messages, mp3_only, audio_only)
     if not messages:
         return False
 
@@ -435,6 +461,7 @@ async def copy_thread_to_forum(
         starter_message,
         session,
         mp3_only=mp3_only,
+        audio_only=audio_only,
     )
     source_label = build_thread_source_label(source_thread)
 
@@ -445,6 +472,7 @@ async def copy_thread_to_forum(
             session,
             source_label,
             mp3_only=mp3_only,
+            audio_only=audio_only,
         )
 
     kwargs = {"archived": source_thread.archived, "locked": source_thread.locked}
@@ -460,6 +488,7 @@ async def copy_thread_to_channel(
     include_bots: bool,
     session: aiohttp.ClientSession,
     mp3_only: bool = False,
+    audio_only: bool = False,
     thread_label: str | None = None,
 ) -> int:
     messages = await collect_messages(
@@ -470,13 +499,13 @@ async def copy_thread_to_channel(
         include_bots=include_bots,
         on_progress=None,
     )
-    messages = filter_messages_for_transfer(messages, mp3_only)
+    messages = filter_messages_for_transfer(messages, mp3_only, audio_only)
     if not messages:
         return 0
 
     source_label = build_thread_source_label(source_thread)
     copied = 0
-    if thread_label and not mp3_only:
+    if thread_label and not is_audio_only_transfer(mp3_only, audio_only):
         await target_channel.send(
             thread_label,
             allowed_mentions=discord.AllowedMentions.none(),
@@ -488,6 +517,7 @@ async def copy_thread_to_channel(
             session,
             source_label,
             mp3_only=mp3_only,
+            audio_only=audio_only,
         )
         if sent:
             copied += 1
@@ -500,6 +530,7 @@ async def copy_forum_to_thread(
     include_bots: bool,
     session: aiohttp.ClientSession,
     mp3_only: bool = False,
+    audio_only: bool = False,
 ) -> int:
     threads = await collect_forum_threads(source_forum, None)
     copied = 0
@@ -511,6 +542,7 @@ async def copy_forum_to_thread(
             include_bots,
             session,
             mp3_only=mp3_only,
+            audio_only=audio_only,
             thread_label=f"**Thread:** {thread.name}",
         )
 
