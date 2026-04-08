@@ -26,6 +26,8 @@ from .transfer import (
     copy_thread_to_forum,
     copy_thread_to_channel,
     filter_messages_for_transfer,
+    get_effective_attachments,
+    get_message_creator_id,
     is_audio_attachment,
     repost_message,
 )
@@ -241,7 +243,7 @@ class MotionXBot(commands.Bot):
         for index in range(len(messages) - 1, -1, -1):
             message = messages[index]
             creator_id = self.resolve_audio_creator_id(messages, index)
-            for attachment in message.attachments:
+            for attachment in get_effective_attachments(message):
                 if not is_audio_attachment(attachment):
                     continue
                 if normalized_query not in attachment.filename.lower():
@@ -255,8 +257,9 @@ class MotionXBot(commands.Bot):
         index: int,
     ) -> Optional[int]:
         message = messages[index]
+        direct_creator_id = get_message_creator_id(message)
         if not message.author.bot:
-            return message.author.id
+            return direct_creator_id
 
         for next_index in range(index + 1, min(len(messages), index + 8)):
             next_message = messages[next_index]
@@ -264,14 +267,14 @@ class MotionXBot(commands.Bot):
             if caption_match:
                 return int(caption_match.group(1))
 
-            has_audio = any(is_audio_attachment(attachment) for attachment in next_message.attachments)
+            has_audio = any(is_audio_attachment(attachment) for attachment in get_effective_attachments(next_message))
             if next_message.author.bot and has_audio and not (next_message.content or "").strip():
                 continue
-            if not next_message.attachments and not (next_message.content or "").strip():
+            if not get_effective_attachments(next_message) and not (next_message.content or "").strip():
                 continue
             break
 
-        return message.author.id
+        return direct_creator_id
 
     def build_audio_result_embed(
         self,

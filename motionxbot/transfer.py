@@ -73,6 +73,55 @@ def build_thread_source_label(source_thread: discord.Thread) -> str:
     return f"{parent_label} / {source_thread.name}"
 
 
+def get_message_snapshots(message: discord.Message) -> list[discord.MessageSnapshot]:
+    return list(getattr(message, "message_snapshots", []) or [])
+
+
+def get_effective_attachments(message: discord.Message) -> list[discord.Attachment]:
+    attachments: list[discord.Attachment] = []
+    seen_ids: set[int] = set()
+
+    for attachment in list(message.attachments):
+        if attachment.id in seen_ids:
+            continue
+        seen_ids.add(attachment.id)
+        attachments.append(attachment)
+
+    for snapshot in get_message_snapshots(message):
+        for attachment in snapshot.attachments:
+            if attachment.id in seen_ids:
+                continue
+            seen_ids.add(attachment.id)
+            attachments.append(attachment)
+
+    return attachments
+
+
+def get_effective_content(message: discord.Message) -> str:
+    base_content = (message.content or "").strip()
+    if base_content:
+        return base_content
+
+    snapshot_contents = [
+        snapshot.content.strip()
+        for snapshot in get_message_snapshots(message)
+        if snapshot.content and snapshot.content.strip()
+    ]
+    return "\n\n".join(snapshot_contents)
+
+
+def get_message_creator_id(message: discord.Message) -> int | None:
+    for snapshot in get_message_snapshots(message):
+        cached_message = snapshot.cached_message
+        if cached_message is not None and cached_message.author is not None:
+            return cached_message.author.id
+
+    if message.reference and isinstance(message.reference.resolved, discord.Message):
+        return message.reference.resolved.author.id
+
+    return message.author.id if message.author else None
+
+
 def is_audio_attachment(attachment: discord.Attachment) -> bool:
     filename = attachment.filename.strip().lower()
     content_type = (attachment.content_type or "").lower()
@@ -109,7 +158,7 @@ def filter_messages_for_transfer(
     return [
         message
         for message in messages
-        if any(matches_transfer_filter(attachment, mp3_only, audio_only) for attachment in message.attachments)
+        if any(matches_transfer_filter(attachment, mp3_only, audio_only) for attachment in get_effective_attachments(message))
     ]
 
 
@@ -137,7 +186,7 @@ async def build_attachment_batches(
 
     attachments = [
         attachment
-        for attachment in message.attachments
+        for attachment in get_effective_attachments(message)
         if matches_transfer_filter(attachment, mp3_only, audio_only)
     ]
 
@@ -198,8 +247,9 @@ async def repost_message(
 ) -> bool:
     del source_label
     audio_transfer_only = is_audio_only_transfer(mp3_only, audio_only)
-    content_chunks = split_content("" if audio_transfer_only else message.content or "", MAX_CONTENT_LENGTH)
+    content_chunks = split_content("" if audio_transfer_only else get_effective_content(message), MAX_CONTENT_LENGTH)
     upload_limit = getattr(message.guild, "filesize_limit", DEFAULT_UPLOAD_LIMIT_BYTES)
+    creator_id = get_message_creator_id(message) or message.author.id
     file_batches, filename_batches, skipped = await build_attachment_batches(
         session,
         message,
@@ -223,9 +273,9 @@ async def repost_message(
     else:
         first_body = content_chunks.pop(0) if content_chunks else ""
         footer = (
-            build_attachment_caption(message.author.id, first_filenames)
+            build_attachment_caption(creator_id, first_filenames)
             if first_file_batch
-            else build_text_caption(message.author.id)
+            else build_text_caption(creator_id)
         )
         first_payload = f"{first_body}\n\n{footer}" if first_body else footer
         await target_channel.send(
@@ -246,14 +296,14 @@ async def repost_message(
             )
         else:
             await target_channel.send(
-                build_attachment_caption(message.author.id, batch_filenames),
+                build_attachment_caption(creator_id, batch_filenames),
                 files=batch,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
 
     if audio_transfer_only:
         await target_channel.send(
-            build_creator_caption(message.author.id),
+            build_creator_caption(creator_id),
             allowed_mentions=discord.AllowedMentions.none(),
         )
     else:
@@ -343,9 +393,10 @@ async def create_forum_post(
     audio_transfer_only = is_audio_only_transfer(mp3_only, audio_only)
     applied_tags = map_forum_tags(source_thread, source_forum, target_forum)
     upload_limit = getattr(target_forum.guild, "filesize_limit", DEFAULT_UPLOAD_LIMIT_BYTES)
+    creator_id = get_message_creator_id(starter_message) if starter_message else None
 
     if starter_message:
-        starter_chunks = split_content("" if audio_transfer_only else starter_message.content or "", MAX_CONTENT_LENGTH)
+        starter_chunks = split_content("" if audio_transfer_only else get_effective_content(starter_message), MAX_CONTENT_LENGTH)
         file_batches, filename_batches, skipped = await build_attachment_batches(
             session,
             starter_message,
@@ -363,9 +414,9 @@ async def create_forum_post(
     first_filenames = filename_batches.pop(0) if filename_batches else []
     first_chunk = starter_chunks.pop(0) if starter_chunks else ""
     first_footer = (
-        build_attachment_caption(starter_message.author.id, first_filenames)
+        build_attachment_caption(creator_id or starter_message.author.id, first_filenames)
         if starter_message and first_batch
-        else build_text_caption(starter_message.author.id)
+        else build_text_caption(creator_id or starter_message.author.id)
         if starter_message and not audio_transfer_only
         else ""
     )
@@ -395,7 +446,7 @@ async def create_forum_post(
             )
         else:
             await new_thread.send(
-                build_attachment_caption(starter_message.author.id, batch_filenames)
+                build_attachment_caption(creator_id or starter_message.author.id, batch_filenames)
                 if starter_message
                 else f"{source_thread.name} by @unknown",
                 files=batch,
@@ -404,7 +455,7 @@ async def create_forum_post(
 
     if audio_transfer_only and starter_message and first_batch:
         await new_thread.send(
-            build_creator_caption(starter_message.author.id),
+            build_creator_caption(creator_id or starter_message.author.id),
             allowed_mentions=discord.AllowedMentions.none(),
         )
     elif not audio_transfer_only:
