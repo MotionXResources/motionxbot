@@ -92,13 +92,58 @@ Run:
 powershell -ExecutionPolicy Bypass -File scripts/check.ps1
 ```
 
-## PebbleHost
+Linux:
 
-For PebbleHost Python hosting:
+```bash
+bash scripts/check.sh
+```
 
-- startup command: `python -m motionxbot`
-- Python version: `3.11+`
-- install command: `pip install -r requirements.txt`
+## Hostinger VPS
+
+This repo is now set up for a plain Hostinger Linux VPS with `systemd`.
+
+Recommended target:
+
+- Hostinger Linux VPS
+- Ubuntu 24.04
+- Python `3.11+`
+
+Quick install flow after you clone the repo to `/opt/motionxbot`:
+
+```bash
+cd /opt/motionxbot
+cp .env.example .env
+nano .env
+bash scripts/hostinger/install.sh
+```
+
+That script:
+
+- creates `.venv`
+- installs Python dependencies
+- writes `/etc/systemd/system/motionxbot.service`
+- enables and starts the bot service
+
+Useful Hostinger VPS commands after install:
+
+```bash
+systemctl status motionxbot
+journalctl -u motionxbot -f
+bash scripts/hostinger/update.sh
+```
+
+If you want to install the service manually instead, a template unit file is included at:
+
+```bash
+deploy/hostinger/motionxbot.service
+```
+
+Hostinger VPS notes:
+
+- keep your repo in a stable path like `/opt/motionxbot`
+- leave `.env` in the repo root so the service can read it
+- Discord bots do not need a public web domain just to stay online
+- if you rotate your token, update `.env` and run `systemctl restart motionxbot`
 
 ## Docker
 
