@@ -14,6 +14,12 @@ This build keeps the same operations-first command surface as the earlier JavaSc
 - `/checklist create|add-item|done|reset|show|list|delete`
 - `/todo add|list|done|remove`
 - `/approval create|list|approve|reject`
+- `/whisper send|history`
+- `/warn send|list|clear`
+- `/dmlog user|recent`
+- `/note add|list|remove`
+- `/timeout set|clear`
+- `/autoresponse add|list|remove`
 - `/autorole add|remove|list`
 - `/bulkrole add|remove`
 - `/channel lock|unlock|slowmode|archive`
@@ -65,6 +71,11 @@ The bot now syncs slash commands on startup. If `DISCORD_GUILD_ID` is set, it sy
 - `/transfer` reposts messages and files with short attribution. It does not impersonate the original authors.
 - `/audio search` searches the current channel or thread by default, or a source you specify, and returns clean embed cards with download/open buttons.
 - `mtxaudios <query>` runs the same audio search against the channel or thread where you type it.
+- `/whisper send` can post through the bot into a text channel, thread, forum, category broadcast, or DM a user.
+- `/warn send` DMs a custom warning and saves it to the warning log.
+- `/dmlog` shows inbound and outbound DM history handled by the bot.
+- `/autoresponse` adds simple trigger-based automation replies.
+- `/timeout` and `/note` add quick moderation controls on top of the existing cleanup/role/channel tools.
 - `/transfer forum` recreates forum posts in the target forum and then copies the thread history into them.
 - `/transfer thread` now accepts either a forum or a thread as the source, and either a forum or a thread as the target.
 - If Discord's thread picker does not show a forum post you need, `/transfer thread` also accepts a raw thread ID or a copied Discord thread link for both source and target.

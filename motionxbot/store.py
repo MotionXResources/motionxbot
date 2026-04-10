@@ -17,6 +17,10 @@ def create_guild_defaults() -> dict[str, Any]:
         "todos": [],
         "approvals": {},
         "heartbeat": None,
+        "warnings": [],
+        "modNotes": [],
+        "autoResponses": [],
+        "whispers": [],
     }
 
 
@@ -34,13 +38,17 @@ def normalize_guild_data(data: dict[str, Any] | None = None) -> dict[str, Any]:
         "todos": list(incoming.get("todos") or []),
         "approvals": dict(incoming.get("approvals") or {}),
         "heartbeat": incoming.get("heartbeat") or None,
+        "warnings": list(incoming.get("warnings") or []),
+        "modNotes": list(incoming.get("modNotes") or []),
+        "autoResponses": list(incoming.get("autoResponses") or []),
+        "whispers": list(incoming.get("whispers") or []),
     }
 
 
 class Store:
     def __init__(self, store_path: Path) -> None:
         self.store_path = store_path
-        self.data: dict[str, Any] = {"guilds": {}}
+        self.data: dict[str, Any] = {"guilds": {}, "dmLogs": []}
         self.load()
 
     def load(self) -> dict[str, Any]:
@@ -52,7 +60,7 @@ class Store:
         raw = self.store_path.read_text(encoding="utf-8").strip()
         parsed = json.loads(raw) if raw else {}
         guilds = parsed.get("guilds", {})
-        self.data = {"guilds": {}}
+        self.data = {"guilds": {}, "dmLogs": list(parsed.get("dmLogs") or [])}
         for guild_id, guild_data in guilds.items():
             self.data["guilds"][str(guild_id)] = normalize_guild_data(guild_data)
         self.save()
@@ -67,3 +75,8 @@ class Store:
             self.data["guilds"][key] = create_guild_defaults()
             self.save()
         return self.data["guilds"][key]
+
+    def append_dm_log(self, entry: dict[str, Any], *, max_entries: int = 500) -> None:
+        self.data.setdefault("dmLogs", []).append(entry)
+        self.data["dmLogs"] = self.data["dmLogs"][-max_entries:]
+        self.save()

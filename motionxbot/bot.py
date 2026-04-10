@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional, Tuple
 from uuid import uuid4
 
@@ -158,6 +158,142 @@ class MotionXBot(commands.Bot):
         if isinstance(channel, (discord.TextChannel, discord.Thread)):
             return channel
         return None
+
+    def record_dm_log(
+        self,
+        *,
+        user_id: int,
+        direction: str,
+        content: str,
+        actor_id: Optional[int] = None,
+        context: Optional[str] = None,
+    ) -> None:
+        entry = {
+            "id": make_id(),
+            "userId": str(user_id),
+            "direction": direction,
+            "content": content,
+            "actorId": str(actor_id) if actor_id is not None else None,
+            "context": context,
+            "createdAt": now_ms(),
+        }
+        self.store.append_dm_log(entry)
+
+    def build_forum_post_name(self, message: str, fallback: str = "Bot Whisper") -> str:
+        first_line = (message.strip().splitlines()[0] if message.strip() else fallback).strip()
+        return (first_line[:100] or fallback)[:100]
+
+    def get_category_targets(
+        self,
+        category: discord.CategoryChannel,
+    ) -> list[discord.abc.GuildChannel]:
+        return sorted(
+            [
+                channel
+                for channel in category.guild.channels
+                if getattr(channel, "category_id", None) == category.id
+                and isinstance(channel, (discord.TextChannel, discord.ForumChannel))
+            ],
+            key=lambda item: (item.position, item.id),
+        )
+
+    async def send_whisper_to_target(
+        self,
+        *,
+        source_guild: discord.Guild,
+        content: str,
+        actor: discord.abc.User,
+        target_channel: Optional[discord.TextChannel] = None,
+        target_thread: Optional[discord.Thread] = None,
+        target_forum: Optional[discord.ForumChannel] = None,
+        target_category: Optional[discord.CategoryChannel] = None,
+        target_user: Optional[discord.User] = None,
+        title: Optional[str] = None,
+    ) -> tuple[int, list[str]]:
+        delivered_labels: list[str] = []
+        payload_title = title or self.build_forum_post_name(content, fallback=f"Whisper from {actor.display_name}")
+
+        if target_channel is not None:
+            await target_channel.send(content, allowed_mentions=discord.AllowedMentions.none())
+            delivered_labels.append(target_channel.mention)
+            return 1, delivered_labels
+
+        if target_thread is not None:
+            await target_thread.send(content, allowed_mentions=discord.AllowedMentions.none())
+            delivered_labels.append(target_thread.mention)
+            return 1, delivered_labels
+
+        if target_forum is not None:
+            created = await target_forum.create_thread(
+                name=payload_title,
+                content=content,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            delivered_labels.append(created.thread.mention)
+            return 1, delivered_labels
+
+        if target_user is not None:
+            await target_user.send(content, allowed_mentions=discord.AllowedMentions.none())
+            self.record_dm_log(
+                user_id=target_user.id,
+                direction="outbound",
+                content=content,
+                actor_id=actor.id,
+                context="whisper",
+            )
+            delivered_labels.append(f"DM to {target_user}")
+            return 1, delivered_labels
+
+        if target_category is not None:
+            delivered = 0
+            for channel in self.get_category_targets(target_category):
+                if isinstance(channel, discord.TextChannel):
+                    await channel.send(content, allowed_mentions=discord.AllowedMentions.none())
+                    delivered += 1
+                    delivered_labels.append(channel.mention)
+                elif isinstance(channel, discord.ForumChannel):
+                    created = await channel.create_thread(
+                        name=payload_title,
+                        content=content,
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    )
+                    delivered += 1
+                    delivered_labels.append(created.thread.mention)
+            return delivered, delivered_labels
+
+        raise RuntimeError("No whisper target was provided.")
+
+    def build_whisper_log_entry(
+        self,
+        *,
+        actor_id: int,
+        content: str,
+        delivered_labels: list[str],
+        title: Optional[str],
+    ) -> dict[str, Any]:
+        return {
+            "id": make_id(),
+            "actorId": str(actor_id),
+            "content": content,
+            "targets": delivered_labels,
+            "title": title,
+            "createdAt": now_ms(),
+        }
+
+    def matches_auto_response(self, message: discord.Message, rule: dict[str, Any]) -> bool:
+        content = (message.content or "").strip().lower()
+        trigger = str(rule.get("trigger") or "").strip().lower()
+        if not content or not trigger:
+            return False
+        channel_id = rule.get("channelId")
+        if channel_id and str(message.channel.id) != str(channel_id):
+            return False
+        match_mode = str(rule.get("matchMode") or "contains")
+        if match_mode == "exact":
+            return content == trigger
+        if match_mode == "starts_with":
+            return content.startswith(trigger)
+        return trigger in content
 
     async def ensure_permissions(
         self,
@@ -450,6 +586,14 @@ class MotionXBot(commands.Bot):
 
         normalized = message.content.strip()
         lowered = normalized.lower()
+        if message.guild is None:
+            self.record_dm_log(
+                user_id=message.author.id,
+                direction="inbound",
+                content=message.content,
+                context="dm",
+            )
+
         if lowered == "mtxaudios" or lowered.startswith("mtxaudios "):
             query = normalized[len("mtxaudios") :].strip()
             if not query:
@@ -482,6 +626,22 @@ class MotionXBot(commands.Bot):
                         )
                     else:
                         await self.send_audio_search_results_message(message, query, matches[:5])
+
+        if message.guild is not None:
+            guild_data = self.store.get_guild_data(message.guild.id)
+            for rule in guild_data.get("autoResponses", []):
+                if not rule.get("enabled", True):
+                    continue
+                if not self.matches_auto_response(message, rule):
+                    continue
+                try:
+                    await message.channel.send(
+                        str(rule.get("response") or ""),
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    )
+                except discord.HTTPException:
+                    pass
+                break
 
         await self.process_commands(message)
 
@@ -592,8 +752,8 @@ class MotionXBot(commands.Bot):
             lines = [
                 "**Scheduling:** `/reminder`, `/job`, `/heartbeat`",
                 "**Reusable content:** `/tag`, `/template`",
-                "**Operational tracking:** `/checklist`, `/todo`, `/approval`",
-                "**Server automation:** `/autorole`, `/bulkrole`, `/channel`, `/cleanup`, `/logchannel`, `/transfer messages`, `/transfer all`, `/transfer forum`, `/transfer thread`, `/audio search`, `mtxaudios <query>`",
+                "**Operational tracking:** `/checklist`, `/todo`, `/approval`, `/warn`, `/note`, `/dmlog`",
+                "**Server automation:** `/autorole`, `/bulkrole`, `/channel`, `/cleanup`, `/logchannel`, `/transfer messages`, `/transfer all`, `/transfer forum`, `/transfer thread`, `/audio search`, `/whisper`, `/autoresponse`, `/timeout`, `mtxaudios <query>`",
                 "**Bot status:** `/botstatus`",
                 "",
                 "Most time fields accept compact durations like `15m`, `2h`, `1d`, or `1h30m`.",
@@ -619,6 +779,10 @@ class MotionXBot(commands.Bot):
                 f"Checklists saved: {len(guild_data['checklists'])}",
                 f"Todos tracked: {len(guild_data['todos'])}",
                 f"Approval requests: {len(guild_data['approvals'])}",
+                f"Warnings logged: {len(guild_data['warnings'])}",
+                f"Mod notes: {len(guild_data['modNotes'])}",
+                f"Autoresponses: {len(guild_data['autoResponses'])}",
+                f"Whispers logged: {len(guild_data['whispers'])}",
                 f"Autoroles: {len(guild_data['autoRoles'])}",
                 f"Heartbeat: {'configured' if guild_data['heartbeat'] else 'off'}",
                 f"Log channel: <#{guild_data['logChannelId']}>" if guild_data["logChannelId"] else "Log channel: not set",
@@ -1587,6 +1751,434 @@ class MotionXBot(commands.Bot):
             self.store.save()
             await self.reply_ephemeral(interaction, "Heartbeat disabled.")
 
+        whisper_group = app_commands.Group(name="whisper", description="Send messages through the bot to channels, forums, threads, categories, or users.")
+
+        @whisper_group.command(name="send", description="Send a bot-authored message to a chosen destination.")
+        async def whisper_send(
+            interaction: discord.Interaction,
+            message: str,
+            target_channel: Optional[discord.TextChannel] = None,
+            target_thread: Optional[discord.Thread] = None,
+            target_forum: Optional[discord.ForumChannel] = None,
+            target_category: Optional[discord.CategoryChannel] = None,
+            target_user: Optional[discord.User] = None,
+            title: Optional[str] = None,
+        ) -> None:
+            if interaction.guild is None:
+                await self.reply_ephemeral(interaction, "This command can only be used in a server.")
+                return
+            if not await self.ensure_permissions(interaction, "`/whisper`", manage_messages=True):
+                return
+
+            selected_targets = [
+                item
+                for item in (target_channel, target_thread, target_forum, target_category, target_user)
+                if item is not None
+            ]
+            if len(selected_targets) != 1:
+                await self.reply_ephemeral(
+                    interaction,
+                    "Choose exactly one target: a channel, thread, forum, category, or user.",
+                )
+                return
+
+            await self.defer_ephemeral(interaction)
+            delivered, delivered_labels = await self.send_whisper_to_target(
+                source_guild=interaction.guild,
+                content=message,
+                actor=interaction.user,
+                target_channel=target_channel,
+                target_thread=target_thread,
+                target_forum=target_forum,
+                target_category=target_category,
+                target_user=target_user,
+                title=title,
+            )
+            if delivered == 0:
+                await interaction.edit_original_response(
+                    content="Nothing was delivered. If you targeted a category, make sure it has sendable text or forum channels."
+                )
+                return
+
+            guild_data = self.store.get_guild_data(interaction.guild.id)
+            guild_data["whispers"].append(
+                self.build_whisper_log_entry(
+                    actor_id=interaction.user.id,
+                    content=message,
+                    delivered_labels=delivered_labels,
+                    title=title,
+                )
+            )
+            guild_data["whispers"] = guild_data["whispers"][-200:]
+            self.store.save()
+            await interaction.edit_original_response(
+                content=f"Delivered {delivered} whisper target(s): {', '.join(delivered_labels[:10])}"
+            )
+
+        @whisper_group.command(name="history", description="Show recent bot-authored whisper sends.")
+        async def whisper_history(
+            interaction: discord.Interaction,
+            limit: app_commands.Range[int, 1, 15] = 10,
+        ) -> None:
+            if interaction.guild is None:
+                await self.reply_ephemeral(interaction, "This command can only be used in a server.")
+                return
+            if not await self.ensure_permissions(interaction, "`/whisper`", manage_messages=True):
+                return
+
+            entries = list(reversed(self.store.get_guild_data(interaction.guild.id)["whispers"]))[:limit]
+            if not entries:
+                await self.reply_ephemeral(interaction, "No whisper sends have been recorded yet.")
+                return
+
+            lines = [
+                f"`{entry['id']}` - {render_discord_timestamp(entry['createdAt'])} - {', '.join(entry['targets'][:3])} - {entry['content'][:80]}"
+                for entry in entries
+            ]
+            await self.reply_ephemeral(interaction, "\n".join(lines))
+
+        warn_group = app_commands.Group(name="warn", description="DM custom warnings and track them.")
+
+        @warn_group.command(name="send", description="Send a custom warning DM and save it to the warning log.")
+        async def warn_send(
+            interaction: discord.Interaction,
+            member: discord.User,
+            message: str,
+            title: Optional[str] = None,
+        ) -> None:
+            if interaction.guild is None:
+                await self.reply_ephemeral(interaction, "This command can only be used in a server.")
+                return
+            if not await self.ensure_permissions(interaction, "`/warn`", manage_messages=True):
+                return
+
+            subject = title or f"Warning from {interaction.guild.name}"
+            body = f"**{subject}**\n\n{message}"
+            dm_delivered = True
+            try:
+                await member.send(body, allowed_mentions=discord.AllowedMentions.none())
+                self.record_dm_log(
+                    user_id=member.id,
+                    direction="outbound",
+                    content=body,
+                    actor_id=interaction.user.id,
+                    context="warning",
+                )
+            except discord.HTTPException:
+                dm_delivered = False
+
+            guild_data = self.store.get_guild_data(interaction.guild.id)
+            guild_data["warnings"].append(
+                {
+                    "id": make_id(),
+                    "userId": str(member.id),
+                    "actorId": str(interaction.user.id),
+                    "title": subject,
+                    "message": message,
+                    "dmDelivered": dm_delivered,
+                    "createdAt": now_ms(),
+                }
+            )
+            guild_data["warnings"] = guild_data["warnings"][-250:]
+            self.store.save()
+            await self.reply_ephemeral(
+                interaction,
+                f"Warning logged for {member.mention}. DM {'sent' if dm_delivered else 'failed to send'}.",
+            )
+
+        @warn_group.command(name="list", description="List warning history for one user.")
+        async def warn_list(interaction: discord.Interaction, member: discord.User) -> None:
+            if interaction.guild is None:
+                await self.reply_ephemeral(interaction, "This command can only be used in a server.")
+                return
+            if not await self.ensure_permissions(interaction, "`/warn`", manage_messages=True):
+                return
+
+            warnings = [
+                item
+                for item in self.store.get_guild_data(interaction.guild.id)["warnings"]
+                if str(item["userId"]) == str(member.id)
+            ]
+            warnings.sort(key=lambda item: item["createdAt"], reverse=True)
+            if not warnings:
+                await self.reply_ephemeral(interaction, f"No warnings recorded for {member.mention}.")
+                return
+
+            lines = [
+                f"`{item['id']}` - {render_discord_timestamp(item['createdAt'])} - {item['title']} - DM {'yes' if item['dmDelivered'] else 'no'}"
+                for item in warnings[:15]
+            ]
+            await self.reply_ephemeral(interaction, "\n".join(lines))
+
+        @warn_group.command(name="clear", description="Clear one warning or all warnings for a user.")
+        async def warn_clear(interaction: discord.Interaction, member: discord.User, id: Optional[str] = None) -> None:
+            if interaction.guild is None:
+                await self.reply_ephemeral(interaction, "This command can only be used in a server.")
+                return
+            if not await self.ensure_permissions(interaction, "`/warn`", manage_messages=True):
+                return
+
+            guild_data = self.store.get_guild_data(interaction.guild.id)
+            before = len(guild_data["warnings"])
+            if id:
+                guild_data["warnings"] = [
+                    item
+                    for item in guild_data["warnings"]
+                    if not (str(item["userId"]) == str(member.id) and item["id"] == id)
+                ]
+            else:
+                guild_data["warnings"] = [
+                    item for item in guild_data["warnings"] if str(item["userId"]) != str(member.id)
+                ]
+            removed = before - len(guild_data["warnings"])
+            self.store.save()
+            await self.reply_ephemeral(interaction, f"Removed {removed} warning(s) for {member.mention}.")
+
+        dmlog_group = app_commands.Group(name="dmlog", description="Inspect inbound and outbound DMs handled by the bot.")
+
+        @dmlog_group.command(name="user", description="Show DM history for one user.")
+        async def dmlog_user(
+            interaction: discord.Interaction,
+            user: discord.User,
+            limit: app_commands.Range[int, 1, 20] = 10,
+        ) -> None:
+            if interaction.guild is None:
+                await self.reply_ephemeral(interaction, "This command can only be used in a server.")
+                return
+            if not await self.ensure_permissions(interaction, "`/dmlog`", manage_messages=True):
+                return
+
+            logs = [
+                item for item in reversed(self.store.data.get("dmLogs", []))
+                if str(item.get("userId")) == str(user.id)
+            ][:limit]
+            if not logs:
+                await self.reply_ephemeral(interaction, f"No DM logs found for {user}.")
+                return
+
+            lines = [
+                f"{item['direction']} - {render_discord_timestamp(item['createdAt'])} - {item.get('context') or 'dm'} - {str(item['content'])[:120]}"
+                for item in logs
+            ]
+            await self.reply_ephemeral(interaction, "\n".join(lines))
+
+        @dmlog_group.command(name="recent", description="Show the most recent DM activity handled by the bot.")
+        async def dmlog_recent(
+            interaction: discord.Interaction,
+            limit: app_commands.Range[int, 1, 20] = 10,
+        ) -> None:
+            if interaction.guild is None:
+                await self.reply_ephemeral(interaction, "This command can only be used in a server.")
+                return
+            if not await self.ensure_permissions(interaction, "`/dmlog`", manage_messages=True):
+                return
+
+            logs = list(reversed(self.store.data.get("dmLogs", [])))[:limit]
+            if not logs:
+                await self.reply_ephemeral(interaction, "No DM activity has been logged yet.")
+                return
+
+            lines = [
+                f"{item['direction']} - <@{item['userId']}> - {render_discord_timestamp(item['createdAt'])} - {str(item['content'])[:100]}"
+                for item in logs
+            ]
+            await self.reply_ephemeral(interaction, "\n".join(lines))
+
+        note_group = app_commands.Group(name="note", description="Keep private moderation notes on members.")
+
+        @note_group.command(name="add", description="Add a moderation note.")
+        async def note_add(interaction: discord.Interaction, member: discord.User, note: str) -> None:
+            if interaction.guild is None:
+                await self.reply_ephemeral(interaction, "This command can only be used in a server.")
+                return
+            if not await self.ensure_permissions(interaction, "`/note`", manage_messages=True):
+                return
+
+            guild_data = self.store.get_guild_data(interaction.guild.id)
+            entry = {
+                "id": make_id(),
+                "userId": str(member.id),
+                "actorId": str(interaction.user.id),
+                "note": note,
+                "createdAt": now_ms(),
+            }
+            guild_data["modNotes"].append(entry)
+            guild_data["modNotes"] = guild_data["modNotes"][-300:]
+            self.store.save()
+            await self.reply_ephemeral(interaction, f"Saved note `{entry['id']}` for {member.mention}.")
+
+        @note_group.command(name="list", description="List moderation notes for one member.")
+        async def note_list(interaction: discord.Interaction, member: discord.User) -> None:
+            if interaction.guild is None:
+                await self.reply_ephemeral(interaction, "This command can only be used in a server.")
+                return
+            if not await self.ensure_permissions(interaction, "`/note`", manage_messages=True):
+                return
+
+            notes = [
+                item
+                for item in self.store.get_guild_data(interaction.guild.id)["modNotes"]
+                if str(item["userId"]) == str(member.id)
+            ]
+            notes.sort(key=lambda item: item["createdAt"], reverse=True)
+            if not notes:
+                await self.reply_ephemeral(interaction, f"No notes recorded for {member.mention}.")
+                return
+
+            lines = [
+                f"`{item['id']}` - {render_discord_timestamp(item['createdAt'])} - {item['note'][:120]}"
+                for item in notes[:15]
+            ]
+            await self.reply_ephemeral(interaction, "\n".join(lines))
+
+        @note_group.command(name="remove", description="Remove a moderation note by id.")
+        async def note_remove(interaction: discord.Interaction, id: str) -> None:
+            if interaction.guild is None:
+                await self.reply_ephemeral(interaction, "This command can only be used in a server.")
+                return
+            if not await self.ensure_permissions(interaction, "`/note`", manage_messages=True):
+                return
+
+            guild_data = self.store.get_guild_data(interaction.guild.id)
+            before = len(guild_data["modNotes"])
+            guild_data["modNotes"] = [item for item in guild_data["modNotes"] if item["id"] != id]
+            self.store.save()
+            await self.reply_ephemeral(
+                interaction,
+                "Note removed." if len(guild_data["modNotes"]) != before else f"No note found for id `{id}`.",
+            )
+
+        timeout_group = app_commands.Group(name="timeout", description="Quick member timeout controls.")
+
+        @timeout_group.command(name="set", description="Timeout a member for a duration like 30m or 2d.")
+        async def timeout_set(
+            interaction: discord.Interaction,
+            member: discord.Member,
+            duration: str,
+            reason: Optional[str] = None,
+            dm: bool = False,
+        ) -> None:
+            if interaction.guild is None:
+                await self.reply_ephemeral(interaction, "This command can only be used in a server.")
+                return
+            if not await self.ensure_permissions(interaction, "`/timeout`", moderate_members=True):
+                return
+
+            duration_ms = parse_duration(duration)
+            if duration_ms is None or duration_ms <= 0:
+                await self.reply_ephemeral(interaction, "Use a valid timeout like `30m`, `2h`, or `1d`.")
+                return
+            if duration_ms > 28 * 24 * 60 * 60 * 1000:
+                await self.reply_ephemeral(interaction, "Discord only allows timeouts up to 28 days.")
+                return
+
+            until = discord.utils.utcnow() + timedelta(milliseconds=duration_ms)
+            await member.timeout(until, reason=reason or f"Timed out by {interaction.user}")
+            if dm:
+                notice = f"You were timed out in **{interaction.guild.name}** for {format_duration(duration_ms)}."
+                if reason:
+                    notice += f"\nReason: {reason}"
+                try:
+                    await member.send(notice, allowed_mentions=discord.AllowedMentions.none())
+                    self.record_dm_log(
+                        user_id=member.id,
+                        direction="outbound",
+                        content=notice,
+                        actor_id=interaction.user.id,
+                        context="timeout",
+                    )
+                except discord.HTTPException:
+                    pass
+            await self.reply_ephemeral(
+                interaction,
+                f"{member.mention} timed out until {render_discord_timestamp(int(until.timestamp() * 1000))}.",
+            )
+
+        @timeout_group.command(name="clear", description="Remove a member timeout.")
+        async def timeout_clear(
+            interaction: discord.Interaction,
+            member: discord.Member,
+            reason: Optional[str] = None,
+        ) -> None:
+            if interaction.guild is None:
+                await self.reply_ephemeral(interaction, "This command can only be used in a server.")
+                return
+            if not await self.ensure_permissions(interaction, "`/timeout`", moderate_members=True):
+                return
+
+            await member.timeout(None, reason=reason or f"Timeout cleared by {interaction.user}")
+            await self.reply_ephemeral(interaction, f"Timeout removed for {member.mention}.")
+
+        autoresponse_group = app_commands.Group(name="autoresponse", description="Reply automatically when trigger phrases appear.")
+        auto_response_modes = [
+            app_commands.Choice(name="contains", value="contains"),
+            app_commands.Choice(name="exact", value="exact"),
+            app_commands.Choice(name="starts_with", value="starts_with"),
+        ]
+
+        @autoresponse_group.command(name="add", description="Add an automatic text response rule.")
+        @app_commands.choices(mode=auto_response_modes)
+        async def autoresponse_add(
+            interaction: discord.Interaction,
+            trigger: str,
+            response: str,
+            mode: app_commands.Choice[str],
+            channel: Optional[discord.TextChannel] = None,
+        ) -> None:
+            if interaction.guild is None:
+                await self.reply_ephemeral(interaction, "This command can only be used in a server.")
+                return
+            if not await self.ensure_permissions(interaction, "`/autoresponse`", manage_guild=True):
+                return
+
+            guild_data = self.store.get_guild_data(interaction.guild.id)
+            entry = {
+                "id": make_id(),
+                "trigger": trigger,
+                "response": response,
+                "matchMode": mode.value,
+                "channelId": str(channel.id) if channel else None,
+                "enabled": True,
+                "createdAt": now_ms(),
+            }
+            guild_data["autoResponses"].append(entry)
+            guild_data["autoResponses"] = guild_data["autoResponses"][-100:]
+            self.store.save()
+            await self.reply_ephemeral(interaction, f"Autoresponse `{entry['id']}` added.")
+
+        @autoresponse_group.command(name="list", description="List autoresponse rules.")
+        async def autoresponse_list(interaction: discord.Interaction) -> None:
+            if interaction.guild is None:
+                await self.reply_ephemeral(interaction, "This command can only be used in a server.")
+                return
+            rules = list(reversed(self.store.get_guild_data(interaction.guild.id)["autoResponses"]))
+            if not rules:
+                await self.reply_ephemeral(interaction, "No autoresponses configured.")
+                return
+
+            lines = [
+                f"`{item['id']}` - {item['matchMode']} - {item['trigger']} - {('<#' + item['channelId'] + '>') if item['channelId'] else 'all channels'}"
+                for item in rules[:20]
+            ]
+            await self.reply_ephemeral(interaction, "\n".join(lines))
+
+        @autoresponse_group.command(name="remove", description="Remove an autoresponse by id.")
+        async def autoresponse_remove(interaction: discord.Interaction, id: str) -> None:
+            if interaction.guild is None:
+                await self.reply_ephemeral(interaction, "This command can only be used in a server.")
+                return
+            if not await self.ensure_permissions(interaction, "`/autoresponse`", manage_guild=True):
+                return
+
+            guild_data = self.store.get_guild_data(interaction.guild.id)
+            before = len(guild_data["autoResponses"])
+            guild_data["autoResponses"] = [item for item in guild_data["autoResponses"] if item["id"] != id]
+            self.store.save()
+            await self.reply_ephemeral(
+                interaction,
+                "Autoresponse removed." if len(guild_data["autoResponses"]) != before else f"No autoresponse found for id `{id}`.",
+            )
+
         audio_group = app_commands.Group(name="audio", description="Search audio attachments by filename.")
 
         @audio_group.command(name="search", description="Search for audio attachments by filename in a channel, thread, or forum.")
@@ -2021,6 +2613,12 @@ class MotionXBot(commands.Bot):
         tree.add_command(checklist_group)
         tree.add_command(todo_group)
         tree.add_command(approval_group)
+        tree.add_command(whisper_group)
+        tree.add_command(warn_group)
+        tree.add_command(dmlog_group)
+        tree.add_command(note_group)
+        tree.add_command(timeout_group)
+        tree.add_command(autoresponse_group)
         tree.add_command(autorole_group)
         tree.add_command(bulkrole_group)
         tree.add_command(audio_group)
