@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import traceback
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional, Tuple
 from uuid import uuid4
@@ -743,6 +744,27 @@ class MotionXBot(commands.Bot):
 
     def register_app_commands(self) -> None:
         tree = self.tree
+
+        @tree.error
+        async def on_app_command_error(
+            interaction: discord.Interaction,
+            error: app_commands.AppCommandError,
+        ) -> None:
+            command_name = interaction.command.qualified_name if interaction.command else "unknown"
+            print(f"App command error in /{command_name}: {error}")
+            traceback.print_exception(type(error), error, error.__traceback__)
+
+            if isinstance(error, app_commands.CheckFailure):
+                message = "You do not have permission to use that command here."
+            elif isinstance(error, app_commands.CommandOnCooldown):
+                message = "That command is on cooldown right now. Try again in a moment."
+            else:
+                message = f"That command failed: {error}"
+
+            try:
+                await self.reply_ephemeral(interaction, message[:1900])
+            except discord.HTTPException:
+                pass
 
         @app_commands.command(
             name="automation-help",
