@@ -43,6 +43,31 @@ def make_id() -> str:
 
 
 CREATOR_CAPTION_RE = re.compile(r"^created by <@!?(\d+)>$", re.IGNORECASE)
+CHANNEL_TIMER_WARNING_STEPS = [
+    7 * 24 * 60 * 60 * 1000,
+    24 * 60 * 60 * 1000,
+    6 * 60 * 60 * 1000,
+    60 * 60 * 1000,
+    30 * 60 * 1000,
+    10 * 60 * 1000,
+    5 * 60 * 1000,
+    60 * 1000,
+]
+
+
+def parse_duration_list(raw: Optional[str]) -> Optional[list[int]]:
+    if raw is None:
+        return None
+
+    values: list[int] = []
+    for part in raw.split(","):
+        parsed = parse_duration(part.strip())
+        if parsed is None:
+            return None
+        values.append(parsed)
+
+    deduped = sorted({value for value in values if value > 0}, reverse=True)
+    return deduped
 
 
 class MotionXBot(commands.Bot):
@@ -159,6 +184,215 @@ class MotionXBot(commands.Bot):
         if isinstance(channel, (discord.TextChannel, discord.Thread)):
             return channel
         return None
+
+    async def resolve_timer_target(self, guild: discord.Guild, channel_id: int) -> Optional[Any]:
+        channel = guild.get_channel(channel_id) or guild.get_thread(channel_id)
+        if channel is None:
+            try:
+                channel = await self.fetch_channel(channel_id)
+            except discord.HTTPException:
+                return None
+
+        if isinstance(channel, (discord.TextChannel, discord.Thread, discord.ForumChannel)):
+            return channel
+        return None
+
+    def get_timer_target_from_context(self, channel: Any) -> Optional[Any]:
+        if isinstance(channel, (discord.TextChannel, discord.Thread, discord.ForumChannel)):
+            return channel
+        return None
+
+    def build_channel_timer_warning_offsets(
+        self,
+        duration_ms: int,
+        custom_steps: Optional[str] = None,
+    ) -> list[int]:
+        if custom_steps is not None:
+            parsed_steps = parse_duration_list(custom_steps)
+            if parsed_steps is None:
+                return []
+            steps = parsed_steps
+        else:
+            steps = CHANNEL_TIMER_WARNING_STEPS
+        return [step for step in steps if 0 < step < duration_ms]
+
+    def build_channel_timer_placeholders(
+        self,
+        guild: discord.Guild,
+        channel: Any,
+        delete_at_ms: int,
+        remaining_ms: int,
+    ) -> dict[str, str]:
+        placeholders = build_base_placeholders(guild=guild, channel=channel, user=self.user)
+        placeholders.update(
+            {
+                "remaining": format_duration(max(remaining_ms, 0)),
+                "delete_at": render_discord_timestamp(delete_at_ms),
+                "channel_mention": getattr(channel, "mention", f"#{getattr(channel, 'name', 'channel')}"),
+                "channel_name": getattr(channel, "name", "channel"),
+            }
+        )
+        return placeholders
+
+    async def send_channel_timer_warning(
+        self,
+        guild: discord.Guild,
+        channel: Any,
+        timer: dict[str, Any],
+        remaining_ms: int,
+    ) -> None:
+        template = str(
+            timer.get("warningMessage")
+            or "{channel_mention} will be deleted in {remaining} at {delete_at}."
+        )
+        content = render_template_text(
+            template,
+            self.build_channel_timer_placeholders(guild, channel, int(timer["deleteAt"]), remaining_ms),
+        )
+
+        if isinstance(channel, (discord.TextChannel, discord.Thread)):
+            try:
+                await channel.send(content, allowed_mentions=discord.AllowedMentions.none())
+                return
+            except discord.HTTPException:
+                pass
+
+        await self.log_to_guild(
+            guild.id,
+            f"Timer warning for {getattr(channel, 'mention', timer['channelId'])}: {content}",
+        )
+
+    async def delete_scheduled_channel(
+        self,
+        guild: discord.Guild,
+        channel: Any,
+        timer: dict[str, Any],
+    ) -> None:
+        placeholders = self.build_channel_timer_placeholders(guild, channel, int(timer["deleteAt"]), 0)
+        final_note = str(timer.get("finalNote") or "").strip()
+        channel_label = getattr(channel, "mention", f"#{getattr(channel, 'name', timer['channelId'])}")
+        reason = str(timer.get("reason") or "MotionXBot scheduled deletion")
+
+        if final_note:
+            await self.log_to_guild(
+                guild.id,
+                render_template_text(final_note, placeholders),
+            )
+
+        await channel.delete(reason=reason[:512])
+        await self.log_to_guild(
+            guild.id,
+            f"Deleted {channel_label} on schedule set by <@{timer['createdBy']}>.",
+        )
+
+    async def collect_count_sources(
+        self,
+        guild: discord.Guild,
+        *,
+        source_channel: Optional[discord.TextChannel] = None,
+        source_thread: Optional[discord.Thread] = None,
+        source_forum: Optional[discord.ForumChannel] = None,
+    ) -> list[Any]:
+        if source_thread is not None:
+            return [source_thread]
+        if source_channel is not None:
+            return [source_channel]
+        if source_forum is not None:
+            return await collect_forum_threads(source_forum, None)
+
+        sources: list[Any] = []
+        seen_ids: set[int] = set()
+
+        def add_source(item: Any) -> None:
+            item_id = getattr(item, "id", None)
+            if item_id is None or item_id in seen_ids:
+                return
+            seen_ids.add(item_id)
+            sources.append(item)
+
+        for channel in sorted(guild.text_channels, key=lambda item: (item.position, item.id)):
+            add_source(channel)
+
+        for thread in sorted(guild.threads, key=lambda item: item.id):
+            add_source(thread)
+
+        for channel in guild.channels:
+            if not isinstance(channel, (discord.TextChannel, discord.ForumChannel)):
+                continue
+            try:
+                async for thread in channel.archived_threads(limit=None):
+                    add_source(thread)
+            except (AttributeError, discord.Forbidden, discord.HTTPException):
+                continue
+
+        return sources
+
+    def describe_check_scope(
+        self,
+        *,
+        source_channel: Optional[discord.TextChannel] = None,
+        source_thread: Optional[discord.Thread] = None,
+        source_forum: Optional[discord.ForumChannel] = None,
+    ) -> str:
+        if source_thread is not None:
+            return f"in {source_thread.mention}"
+        if source_channel is not None:
+            return f"in {source_channel.mention}"
+        if source_forum is not None:
+            return f"in {source_forum.mention}"
+        return "across the server"
+
+    async def count_messages_by_author(
+        self,
+        guild: discord.Guild,
+        *,
+        source_channel: Optional[discord.TextChannel] = None,
+        source_thread: Optional[discord.Thread] = None,
+        source_forum: Optional[discord.ForumChannel] = None,
+        target_user_id: Optional[int] = None,
+        since_ms: Optional[int] = None,
+        interaction: Optional[discord.Interaction] = None,
+    ) -> tuple[dict[int, int], int, int]:
+        sources = await self.collect_count_sources(
+            guild,
+            source_channel=source_channel,
+            source_thread=source_thread,
+            source_forum=source_forum,
+        )
+        counts: dict[int, int] = {}
+        scanned_messages = 0
+        after_time = (
+            datetime.now(tz=timezone.utc) - timedelta(milliseconds=since_ms)
+            if since_ms is not None
+            else None
+        )
+        last_progress_at = 0.0
+
+        for index, source in enumerate(sources, start=1):
+            try:
+                async for message in source.history(limit=None, after=after_time, oldest_first=False):
+                    scanned_messages += 1
+                    if target_user_id is not None and message.author.id != target_user_id:
+                        continue
+                    counts[message.author.id] = counts.get(message.author.id, 0) + 1
+
+                    if (
+                        interaction is not None
+                        and self.loop.time() - last_progress_at >= 2.5
+                    ):
+                        last_progress_at = self.loop.time()
+                        await interaction.edit_original_response(
+                            content=(
+                                f"Checking messages {self.describe_check_scope(source_channel=source_channel, source_thread=source_thread, source_forum=source_forum)}...\n"
+                                f"Sources scanned: {index}/{len(sources)}\n"
+                                f"Messages scanned: {scanned_messages}\n"
+                                f"Matches: {sum(counts.values())}"
+                            )
+                        )
+            except (discord.Forbidden, discord.HTTPException):
+                continue
+
+        return counts, scanned_messages, len(sources)
 
     def record_dm_log(
         self,
@@ -658,6 +892,7 @@ class MotionXBot(commands.Bot):
             await self.process_reminders(guild, guild_data, current_ms)
             await self.process_jobs(guild, guild_data, current_ms)
             await self.process_heartbeat(guild, guild_data, current_ms)
+            await self.process_channel_timers(guild, guild_data, current_ms)
 
         self.store.save()
 
@@ -742,6 +977,64 @@ class MotionXBot(commands.Bot):
         heartbeat["lastRunAt"] = current_ms
         heartbeat["nextRunAt"] = current_ms + int(heartbeat["intervalMs"])
 
+    async def process_channel_timers(
+        self,
+        guild: discord.Guild,
+        guild_data: dict[str, Any],
+        current_ms: int,
+    ) -> None:
+        timers = list(guild_data.get("channelTimers") or [])
+        if not timers:
+            return
+
+        remaining_timers: list[dict[str, Any]] = []
+        for timer in timers:
+            channel = await self.resolve_timer_target(guild, int(timer["channelId"]))
+            if channel is None:
+                continue
+
+            delete_at = int(timer["deleteAt"])
+            if timer.get("deleteIfEmpty"):
+                try:
+                    latest_message = None
+                    async for candidate in channel.history(limit=1):
+                        latest_message = candidate
+                    if latest_message is not None and latest_message.created_at.timestamp() * 1000 > int(timer["createdAt"]):
+                        await self.log_to_guild(
+                            guild.id,
+                            f"Cancelled idle-only deletion for {getattr(channel, 'mention', timer['channelId'])} because new activity was detected.",
+                        )
+                        continue
+                except (AttributeError, discord.Forbidden, discord.HTTPException):
+                    remaining_timers.append(timer)
+                    continue
+
+            remaining_ms = delete_at - current_ms
+            warned_offsets = {int(offset) for offset in timer.get("warnedOffsetsMs") or []}
+            for offset in sorted((int(value) for value in timer.get("warningOffsetsMs") or []), reverse=True):
+                if offset in warned_offsets or remaining_ms > offset or remaining_ms <= 0:
+                    continue
+                try:
+                    await self.send_channel_timer_warning(guild, channel, timer, remaining_ms)
+                    warned_offsets.add(offset)
+                except discord.HTTPException:
+                    continue
+
+            timer["warnedOffsetsMs"] = sorted(warned_offsets, reverse=True)
+
+            if current_ms < delete_at:
+                remaining_timers.append(timer)
+                continue
+
+            try:
+                await self.delete_scheduled_channel(guild, channel, timer)
+            except discord.HTTPException as error:
+                timer["deleteAt"] = current_ms + 15 * 60 * 1000
+                timer["lastError"] = str(error)
+                remaining_timers.append(timer)
+
+        guild_data["channelTimers"] = remaining_timers
+
     def register_app_commands(self) -> None:
         tree = self.tree
 
@@ -774,11 +1067,12 @@ class MotionXBot(commands.Bot):
             lines = [
                 "**Scheduling:** `/reminder`, `/job`, `/heartbeat`",
                 "**Reusable content:** `/tag`, `/template`",
-                "**Operational tracking:** `/checklist`, `/todo`, `/approval`, `/warn`, `/note`, `/dmlog`",
+                "**Operational tracking:** `/checklist`, `/todo`, `/approval`, `/check`, `/warn`, `/note`, `/dmlog`",
                 "**Server automation:** `/autorole`, `/bulkrole`, `/channel`, `/cleanup`, `/logchannel`, `/transfer messages`, `/transfer all`, `/transfer forum`, `/transfer thread`, `/audio search`, `/whisper`, `/autoresponse`, `/timeout`, `mtxaudios <query>`",
                 "**Bot status:** `/botstatus`",
                 "",
                 "Most time fields accept compact durations like `15m`, `2h`, `1d`, or `1h30m`.",
+                "Use `/channel delete-in` to put a timed warning + deletion countdown on the current channel or thread.",
                 "Transfer commands also support `mp3_only` and `audio_only` toggles for file-only audio copies.",
             ]
             await self.reply_ephemeral(interaction, "\n".join(lines))
@@ -806,6 +1100,7 @@ class MotionXBot(commands.Bot):
                 f"Autoresponses: {len(guild_data['autoResponses'])}",
                 f"Whispers logged: {len(guild_data['whispers'])}",
                 f"Autoroles: {len(guild_data['autoRoles'])}",
+                f"Channel timers: {len(guild_data['channelTimers'])}",
                 f"Heartbeat: {'configured' if guild_data['heartbeat'] else 'off'}",
                 f"Log channel: <#{guild_data['logChannelId']}>" if guild_data["logChannelId"] else "Log channel: not set",
             ]
@@ -1632,6 +1927,127 @@ class MotionXBot(commands.Bot):
             await interaction.channel.set_permissions(interaction.guild.default_role, overwrite=overwrite)
             await self.reply_ephemeral(interaction, f"{interaction.channel.mention} archived.")
 
+        @channel_group.command(name="delete-in", description="Schedule this current channel, thread, or forum to be deleted later.")
+        @app_commands.rename(after="in")
+        async def channel_delete_in(
+            interaction: discord.Interaction,
+            after: str,
+            warning_message: Optional[str] = None,
+            warn_at: Optional[str] = None,
+            final_note: Optional[str] = None,
+            only_if_idle: bool = False,
+        ) -> None:
+            if interaction.guild is None:
+                await self.reply_ephemeral(interaction, "This command can only be used in a server.")
+                return
+            if not await self.ensure_permissions(interaction, "`/channel delete-in`", manage_channels=True):
+                return
+
+            target = self.get_timer_target_from_context(interaction.channel)
+            if target is None:
+                await self.reply_ephemeral(interaction, "Use this inside the channel, thread, or forum you want to schedule.")
+                return
+            if only_if_idle and isinstance(target, discord.ForumChannel):
+                await self.reply_ephemeral(interaction, "`only_if_idle` currently works for text channels and threads, not whole forums.")
+                return
+
+            delay_ms = parse_duration(after)
+            if delay_ms is None or delay_ms < 60 * 1000:
+                await self.reply_ephemeral(interaction, "Use a deletion delay of at least `1m`.")
+                return
+
+            warning_offsets = self.build_channel_timer_warning_offsets(delay_ms, warn_at)
+            if warn_at is not None and not warning_offsets and delay_ms >= 2 * 60 * 1000:
+                await self.reply_ephemeral(interaction, "I couldn't parse `warn_at`. Use a comma list like `1h,10m,1m`.")
+                return
+
+            guild_data = self.store.get_guild_data(interaction.guild.id)
+            timer = {
+                "id": make_id(),
+                "channelId": str(target.id),
+                "createdBy": str(interaction.user.id),
+                "createdAt": now_ms(),
+                "deleteAt": now_ms() + delay_ms,
+                "warningMessage": warning_message,
+                "warningOffsetsMs": warning_offsets,
+                "warnedOffsetsMs": [],
+                "finalNote": final_note,
+                "deleteIfEmpty": only_if_idle,
+                "reason": f"MotionXBot scheduled deletion by {interaction.user}",
+            }
+            guild_data["channelTimers"] = [
+                item for item in guild_data["channelTimers"] if str(item["channelId"]) != str(target.id)
+            ]
+            guild_data["channelTimers"].append(timer)
+            self.store.save()
+
+            warning_summary = ", ".join(format_duration(offset) for offset in warning_offsets) if warning_offsets else "none"
+            suffix = (
+                " Warnings will fall back to the log channel if this target cannot receive messages directly."
+                if isinstance(target, discord.ForumChannel)
+                else ""
+            )
+            await self.reply_ephemeral(
+                interaction,
+                f"{target.mention} is set to delete {render_discord_timestamp(timer['deleteAt'])}. "
+                f"Warnings: {warning_summary}. Idle-only: {'yes' if only_if_idle else 'no'}.{suffix}",
+            )
+
+        @channel_group.command(name="delete-status", description="Show the active deletion timer for the current channel, thread, or forum.")
+        async def channel_delete_status(interaction: discord.Interaction) -> None:
+            if interaction.guild is None:
+                await self.reply_ephemeral(interaction, "This command can only be used in a server.")
+                return
+
+            target = self.get_timer_target_from_context(interaction.channel)
+            if target is None:
+                await self.reply_ephemeral(interaction, "Use this inside the channel, thread, or forum you want to inspect.")
+                return
+
+            guild_data = self.store.get_guild_data(interaction.guild.id)
+            timer = next((item for item in guild_data["channelTimers"] if str(item["channelId"]) == str(target.id)), None)
+            if timer is None:
+                await self.reply_ephemeral(interaction, f"No deletion timer is active for {target.mention}.")
+                return
+
+            remaining_ms = max(0, int(timer["deleteAt"]) - now_ms())
+            warnings = ", ".join(format_duration(int(offset)) for offset in timer.get("warningOffsetsMs") or []) or "none"
+            await self.reply_ephemeral(
+                interaction,
+                (
+                    f"{target.mention} deletes {render_discord_timestamp(int(timer['deleteAt']))} "
+                    f"({format_duration(remaining_ms)} from now).\n"
+                    f"Warnings: {warnings}\n"
+                    f"Idle-only: {'yes' if timer.get('deleteIfEmpty') else 'no'}"
+                ),
+            )
+
+        @channel_group.command(name="delete-cancel", description="Cancel the deletion timer for the current channel, thread, or forum.")
+        async def channel_delete_cancel(interaction: discord.Interaction) -> None:
+            if interaction.guild is None:
+                await self.reply_ephemeral(interaction, "This command can only be used in a server.")
+                return
+            if not await self.ensure_permissions(interaction, "`/channel delete-cancel`", manage_channels=True):
+                return
+
+            target = self.get_timer_target_from_context(interaction.channel)
+            if target is None:
+                await self.reply_ephemeral(interaction, "Use this inside the channel, thread, or forum you want to keep.")
+                return
+
+            guild_data = self.store.get_guild_data(interaction.guild.id)
+            before = len(guild_data["channelTimers"])
+            guild_data["channelTimers"] = [
+                item for item in guild_data["channelTimers"] if str(item["channelId"]) != str(target.id)
+            ]
+            self.store.save()
+            await self.reply_ephemeral(
+                interaction,
+                f"Deletion timer cancelled for {target.mention}."
+                if len(guild_data["channelTimers"]) != before
+                else f"No deletion timer was active for {target.mention}.",
+            )
+
         cleanup_group = app_commands.Group(name="cleanup", description="Clean up recent messages.")
 
         async def purge_messages(channel: discord.TextChannel, predicate, limit: int) -> int:
@@ -1674,6 +2090,159 @@ class MotionXBot(commands.Bot):
             )
             await interaction.edit_original_response(
                 content=f"Deleted {removed} message(s). Discord only bulk-deletes messages newer than 14 days."
+            )
+
+        @cleanup_group.command(name="files", description="Delete recent attachment posts in this channel.")
+        async def cleanup_files(interaction: discord.Interaction, limit: int) -> None:
+            if interaction.guild is None or not isinstance(interaction.channel, discord.TextChannel):
+                await self.reply_ephemeral(interaction, "This command must be used in a text channel.")
+                return
+            if not await self.ensure_permissions(interaction, "`/cleanup files`", manage_messages=True):
+                return
+            await self.defer_ephemeral(interaction)
+            removed = await purge_messages(
+                interaction.channel,
+                lambda message: bool(get_effective_attachments(message)),
+                limit,
+            )
+            await interaction.edit_original_response(
+                content=f"Deleted {removed} file post(s). Discord only bulk-deletes messages newer than 14 days."
+            )
+
+        @cleanup_group.command(name="contains", description="Delete recent messages containing a chosen phrase in this channel.")
+        async def cleanup_contains(
+            interaction: discord.Interaction,
+            text: str,
+            limit: int,
+        ) -> None:
+            if interaction.guild is None or not isinstance(interaction.channel, discord.TextChannel):
+                await self.reply_ephemeral(interaction, "This command must be used in a text channel.")
+                return
+            if not await self.ensure_permissions(interaction, "`/cleanup contains`", manage_messages=True):
+                return
+            needle = text.strip().lower()
+            if not needle:
+                await self.reply_ephemeral(interaction, "Enter the phrase you want to clean up.")
+                return
+            await self.defer_ephemeral(interaction)
+            removed = await purge_messages(
+                interaction.channel,
+                lambda message: needle in (message.content or "").lower(),
+                limit,
+            )
+            await interaction.edit_original_response(
+                content=f"Deleted {removed} message(s) containing `{text}`. Discord only bulk-deletes messages newer than 14 days."
+            )
+
+        check_group = app_commands.Group(name="check", description="Check useful server activity stats.")
+
+        @check_group.command(name="messages", description="Count how many messages one user sent in a server, channel, thread, or forum.")
+        async def check_messages(
+            interaction: discord.Interaction,
+            member: discord.Member,
+            source_channel: Optional[discord.TextChannel] = None,
+            source_thread: Optional[discord.Thread] = None,
+            source_forum: Optional[discord.ForumChannel] = None,
+            since: Optional[str] = None,
+        ) -> None:
+            if interaction.guild is None:
+                await self.reply_ephemeral(interaction, "This command can only be used in a server.")
+                return
+            if not await self.ensure_permissions(interaction, "`/check messages`", manage_messages=True):
+                return
+
+            selected_sources = [item for item in (source_channel, source_thread, source_forum) if item is not None]
+            if len(selected_sources) > 1:
+                await self.reply_ephemeral(interaction, "Choose only one source at a time.")
+                return
+
+            since_ms = None
+            if since:
+                since_ms = parse_duration(since)
+                if since_ms is None:
+                    await self.reply_ephemeral(interaction, "I couldn't parse that duration. Try `1d`, `12h`, or `30m`.")
+                    return
+
+            await self.defer_ephemeral(interaction)
+            counts, scanned_messages, scanned_sources = await self.count_messages_by_author(
+                interaction.guild,
+                source_channel=source_channel,
+                source_thread=source_thread,
+                source_forum=source_forum,
+                target_user_id=member.id,
+                since_ms=since_ms,
+                interaction=interaction,
+            )
+            total = counts.get(member.id, 0)
+            duration_label = f" over the last {format_duration(since_ms)}" if since_ms is not None else ""
+            await interaction.edit_original_response(
+                content=(
+                    f"{member.mention} sent **{total}** message(s) "
+                    f"{self.describe_check_scope(source_channel=source_channel, source_thread=source_thread, source_forum=source_forum)}"
+                    f"{duration_label}.\n"
+                    f"Sources scanned: {scanned_sources}\n"
+                    f"Messages scanned: {scanned_messages}"
+                )
+            )
+
+        @check_group.command(name="leaderboard", description="Show the most active senders in a server, channel, thread, or forum.")
+        async def check_leaderboard(
+            interaction: discord.Interaction,
+            source_channel: Optional[discord.TextChannel] = None,
+            source_thread: Optional[discord.Thread] = None,
+            source_forum: Optional[discord.ForumChannel] = None,
+            since: Optional[str] = None,
+            top: app_commands.Range[int, 1, 10] = 5,
+        ) -> None:
+            if interaction.guild is None:
+                await self.reply_ephemeral(interaction, "This command can only be used in a server.")
+                return
+            if not await self.ensure_permissions(interaction, "`/check leaderboard`", manage_messages=True):
+                return
+
+            selected_sources = [item for item in (source_channel, source_thread, source_forum) if item is not None]
+            if len(selected_sources) > 1:
+                await self.reply_ephemeral(interaction, "Choose only one source at a time.")
+                return
+
+            since_ms = None
+            if since:
+                since_ms = parse_duration(since)
+                if since_ms is None:
+                    await self.reply_ephemeral(interaction, "I couldn't parse that duration. Try `1d`, `12h`, or `30m`.")
+                    return
+
+            await self.defer_ephemeral(interaction)
+            counts, scanned_messages, scanned_sources = await self.count_messages_by_author(
+                interaction.guild,
+                source_channel=source_channel,
+                source_thread=source_thread,
+                source_forum=source_forum,
+                target_user_id=None,
+                since_ms=since_ms,
+                interaction=interaction,
+            )
+            ranking = sorted(counts.items(), key=lambda item: item[1], reverse=True)[:top]
+            if not ranking:
+                await interaction.edit_original_response(
+                    content=(
+                        f"No messages were found {self.describe_check_scope(source_channel=source_channel, source_thread=source_thread, source_forum=source_forum)}."
+                    )
+                )
+                return
+
+            duration_label = f" over the last {format_duration(since_ms)}" if since_ms is not None else ""
+            lines = [
+                f"{index}. <@{user_id}> - {count}"
+                for index, (user_id, count) in enumerate(ranking, start=1)
+            ]
+            await interaction.edit_original_response(
+                content=(
+                    f"Top senders {self.describe_check_scope(source_channel=source_channel, source_thread=source_thread, source_forum=source_forum)}"
+                    f"{duration_label}:\n"
+                    + "\n".join(lines)
+                    + f"\n\nSources scanned: {scanned_sources}\nMessages scanned: {scanned_messages}"
+                )
             )
 
         logchannel_group = app_commands.Group(name="logchannel", description="Configure the bot's audit log channel.")
@@ -2643,6 +3212,7 @@ class MotionXBot(commands.Bot):
         tree.add_command(autoresponse_group)
         tree.add_command(autorole_group)
         tree.add_command(bulkrole_group)
+        tree.add_command(check_group)
         tree.add_command(audio_group)
         tree.add_command(channel_group)
         tree.add_command(cleanup_group)

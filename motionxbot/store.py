@@ -9,6 +9,7 @@ def create_guild_defaults() -> dict[str, Any]:
     return {
         "logChannelId": None,
         "autoRoles": [],
+        "channelTimers": [],
         "reminders": [],
         "jobs": [],
         "tags": {},
@@ -30,6 +31,7 @@ def normalize_guild_data(data: dict[str, Any] | None = None) -> dict[str, Any]:
         **create_guild_defaults(),
         **incoming,
         "autoRoles": list(incoming.get("autoRoles") or []),
+        "channelTimers": list(incoming.get("channelTimers") or []),
         "reminders": list(incoming.get("reminders") or []),
         "jobs": list(incoming.get("jobs") or []),
         "tags": dict(incoming.get("tags") or {}),

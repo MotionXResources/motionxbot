@@ -14,6 +14,7 @@ This build keeps the same operations-first command surface as the earlier JavaSc
 - `/checklist create|add-item|done|reset|show|list|delete`
 - `/todo add|list|done|remove`
 - `/approval create|list|approve|reject`
+- `/check messages|leaderboard`
 - `/whisper send|history`
 - `/warn send|list|clear`
 - `/dmlog user|recent`
@@ -22,8 +23,8 @@ This build keeps the same operations-first command surface as the earlier JavaSc
 - `/autoresponse add|list|remove`
 - `/autorole add|remove|list`
 - `/bulkrole add|remove`
-- `/channel lock|unlock|slowmode|archive`
-- `/cleanup bot|user`
+- `/channel lock|unlock|slowmode|archive|delete-in|delete-status|delete-cancel`
+- `/cleanup bot|user|files|contains`
 - `/logchannel set|clear|show`
 - `/heartbeat set|status|clear`
 - `/audio search`
@@ -76,6 +77,10 @@ The bot now syncs slash commands on startup. If `DISCORD_GUILD_ID` is set, it sy
 - `/dmlog` shows inbound and outbound DM history handled by the bot.
 - `/autoresponse` adds simple trigger-based automation replies.
 - `/timeout` and `/note` add quick moderation controls on top of the existing cleanup/role/channel tools.
+- `/channel delete-in` schedules deletion for the current channel/thread/forum, can post countdown warnings, and can optionally only delete if it stayed idle.
+- `/check messages` counts a member's messages either server-wide or inside one channel/thread/forum, with an optional duration filter.
+- `/check leaderboard` shows the most active senders in the chosen scope and time window.
+- `/cleanup files` and `/cleanup contains` handle two common moderation cases without making you hand-roll search filters.
 - `/transfer forum` recreates forum posts in the target forum and then copies the thread history into them.
 - `/transfer thread` now accepts either a forum or a thread as the source, and either a forum or a thread as the target.
 - If Discord's thread picker does not show a forum post you need, `/transfer thread` also accepts a raw thread ID or a copied Discord thread link for both source and target.
