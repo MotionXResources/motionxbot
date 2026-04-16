@@ -2,35 +2,18 @@
 
 Automation-first Discord bot rewritten in Python with `discord.py`.
 
-This build keeps the same operations-first command surface as the earlier JavaScript version: reminders, recurring jobs, templates, tags, approvals, todos, checklists, autoroles, bulk role changes, channel moderation, cleanup, heartbeat jobs, and message/forum transfer tooling.
+This build is now focused on the features you explicitly asked for: audio transfer/search, audio submission review, timed channel deletion, DM moderation tools, and message-count checks.
 
 ## Features
 
-- `/automation-help`
-- `/reminder create|list|cancel|snooze`
-- `/job create|list|pause|resume|remove|run-now`
-- `/tag create|update|post|list|delete`
-- `/template create|update|send|list|delete`
-- `/checklist create|add-item|done|reset|show|list|delete`
-- `/todo add|list|done|remove`
-- `/approval create|list|approve|reject`
-- `/check messages|leaderboard`
-- `/whisper send|history`
-- `/warn send|list|clear`
-- `/dmlog user|recent`
-- `/note add|list|remove`
-- `/timeout set|clear`
-- `/autoresponse add|list|remove`
-- `/autorole add|remove|list`
-- `/bulkrole add|remove`
-- `/channel lock|unlock|slowmode|archive|delete-in|delete-status|delete-cancel`
-- `/cleanup bot|user|files|contains`
-- `/logchannel set|clear|show`
-- `/heartbeat set|status|clear`
-- `/audio search`
+- `/audio setup|settings|submit|status|approve|deny|search`
 - `mtxaudios <query>`
 - `/transfer messages|all|forum|thread`
-- `/botstatus`
+- `/channel delete-in|delete-status|delete-cancel`
+- `/check messages`
+- `/whisper send`
+- `/warn send`
+- `/dmlog user|recent`
 
 ## Setup
 
@@ -67,7 +50,7 @@ The bot now syncs slash commands on startup. If `DISCORD_GUILD_ID` is set, it sy
 
 ## Notes
 
-- Time fields accept compact durations like `15m`, `2h`, `1d`, or `1h30m`.
+- Time fields accept both compact and natural durations like `15m`, `2h`, `1d`, `24 hrs`, or `10 minutes`.
 - Data is stored in `data/store.json`.
 - `/transfer` reposts messages and files with short attribution. It does not impersonate the original authors.
 - `/audio search` searches the current channel or thread by default, or a source you specify, and returns clean embed cards with download/open buttons.
@@ -75,18 +58,21 @@ The bot now syncs slash commands on startup. If `DISCORD_GUILD_ID` is set, it sy
 - `/whisper send` can post through the bot into a text channel, thread, forum, category broadcast, or DM a user.
 - `/warn send` DMs a custom warning and saves it to the warning log.
 - `/dmlog` shows inbound and outbound DM history handled by the bot.
-- `/autoresponse` adds simple trigger-based automation replies.
-- `/timeout` and `/note` add quick moderation controls on top of the existing cleanup/role/channel tools.
 - `/channel delete-in` schedules deletion for the current channel/thread/forum, can post countdown warnings, and can optionally only delete if it stayed idle.
 - `/check messages` counts a member's messages either server-wide or inside one channel/thread/forum, with an optional duration filter.
-- `/check leaderboard` shows the most active senders in the chosen scope and time window.
-- `/cleanup files` and `/cleanup contains` handle two common moderation cases without making you hand-roll search filters.
 - `/transfer forum` recreates forum posts in the target forum and then copies the thread history into them.
 - `/transfer thread` now accepts either a forum or a thread as the source, and either a forum or a thread as the target.
 - If Discord's thread picker does not show a forum post you need, `/transfer thread` also accepts a raw thread ID or a copied Discord thread link for both source and target.
 - Transfer commands support `mp3_only` for just MP3s and `audio_only` for MP3/WAV/other audio attachments, both with file-only reposting plus a creator line.
 - Thread/file attribution is kept short, for example `voice-note.mp3 by @original_creator`.
 - Forum tags only carry across automatically when the target forum already has matching tag names.
+- Audio submission review flow:
+  - Admin runs `/audio setup`
+  - Creator runs `/audio submit`
+  - Bot creates a private temporary review channel
+  - Creator uploads the audio there
+  - Reviewer uses `/audio approve` or `/audio deny`
+  - Approved audio is posted into the configured destination and the temp review channel is cleaned up automatically
 - This bot requires the `Message Content` and `Server Members` privileged intents in the Discord Developer Portal.
 
 ## Validation

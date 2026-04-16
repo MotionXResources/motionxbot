@@ -11,6 +11,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
+from .command_registry import register_commands
 from .config import load_config
 from .health import start_health_server
 from .rendering import build_base_placeholders, parse_assignments, render_template_text
@@ -19,7 +20,9 @@ from .time_utils import format_duration, parse_duration, render_discord_timestam
 from .transfer import (
     HARD_LIMIT,
     PROGRESS_UPDATE_INTERVAL,
+    build_attachment_batches,
     build_summary,
+    build_creator_caption,
     collect_forum_threads,
     collect_messages,
     copy_forum_to_thread,
@@ -131,7 +134,7 @@ class MotionXBot(commands.Bot):
 
     async def on_member_join(self, member: discord.Member) -> None:
         guild_data = self.store.get_guild_data(member.guild.id)
-        if not guild_data["autoRoles"]:
+        if not guild_data.get("autoRoles"):
             return
 
         applied_roles: list[str] = []
@@ -739,6 +742,365 @@ class MotionXBot(commands.Bot):
                 allowed_mentions=discord.AllowedMentions.none(),
             )
 
+    def get_audio_review_settings(self, guild_id: int | str) -> dict[str, Any]:
+        guild_data = self.store.get_guild_data(guild_id)
+        settings = guild_data.get("audioReview") or {}
+        normalized = {
+            "reviewCategoryId": settings.get("reviewCategoryId"),
+            "reviewerRoleId": settings.get("reviewerRoleId"),
+            "destinationType": settings.get("destinationType"),
+            "destinationId": settings.get("destinationId"),
+            "logChannelId": settings.get("logChannelId"),
+            "closeDelayMs": int(settings.get("closeDelayMs") or 10 * 60 * 1000),
+        }
+        guild_data["audioReview"] = normalized
+        return normalized
+
+    async def resolve_audio_review_destination(
+        self,
+        guild: discord.Guild,
+        settings: dict[str, Any],
+    ) -> Optional[Any]:
+        destination_id = settings.get("destinationId")
+        if not destination_id:
+            return None
+
+        channel = guild.get_channel(int(destination_id)) or guild.get_thread(int(destination_id))
+        if channel is None:
+            try:
+                channel = await self.fetch_channel(int(destination_id))
+            except discord.HTTPException:
+                return None
+
+        if isinstance(channel, (discord.TextChannel, discord.Thread, discord.ForumChannel)):
+            return channel
+        return None
+
+    async def resolve_audio_review_log_channel(
+        self,
+        guild: discord.Guild,
+        settings: dict[str, Any],
+    ) -> Optional[discord.TextChannel]:
+        log_channel_id = settings.get("logChannelId")
+        if not log_channel_id:
+            return None
+
+        channel = guild.get_channel(int(log_channel_id))
+        if channel is None:
+            try:
+                channel = await self.fetch_channel(int(log_channel_id))
+            except discord.HTTPException:
+                return None
+
+        return channel if isinstance(channel, discord.TextChannel) else None
+
+    def describe_audio_review_destination(self, settings: dict[str, Any]) -> str:
+        destination_type = settings.get("destinationType")
+        destination_id = settings.get("destinationId")
+        if not destination_type or not destination_id:
+            return "not configured"
+        return f"{destination_type} `<#{destination_id}>`".replace("`<", "<").replace(">`", ">")
+
+    def get_audio_submission_for_channel(
+        self,
+        guild_id: int | str,
+        channel_id: int,
+    ) -> Optional[dict[str, Any]]:
+        guild_data = self.store.get_guild_data(guild_id)
+        for submission in guild_data.get("audioSubmissions", []):
+            if str(submission.get("channelId")) == str(channel_id) and submission.get("status") not in {"approved", "denied", "closed"}:
+                return submission
+        return None
+
+    async def schedule_submission_channel_cleanup(
+        self,
+        guild: discord.Guild,
+        channel_id: int,
+        actor_id: int,
+        delay_ms: int,
+        reason: str,
+    ) -> None:
+        guild_data = self.store.get_guild_data(guild.id)
+        delete_at = now_ms() + max(delay_ms, 60 * 1000)
+        guild_data["channelTimers"] = [
+            item for item in guild_data.get("channelTimers", []) if str(item.get("channelId")) != str(channel_id)
+        ]
+        guild_data["channelTimers"].append(
+            {
+                "id": make_id(),
+                "channelId": str(channel_id),
+                "createdBy": str(actor_id),
+                "createdAt": now_ms(),
+                "deleteAt": delete_at,
+                "warningMessage": None,
+                "warningOffsetsMs": [],
+                "warnedOffsetsMs": [],
+                "finalNote": None,
+                "deleteIfEmpty": False,
+                "reason": reason,
+            }
+        )
+
+    def build_audio_review_settings_embed(
+        self,
+        guild: discord.Guild,
+        settings: dict[str, Any],
+    ) -> discord.Embed:
+        destination_value = "Not configured"
+        if settings.get("destinationId"):
+            destination_type = str(settings.get("destinationType") or "channel").title()
+            destination_value = f"{destination_type}: <#{settings['destinationId']}>"
+
+        embed = discord.Embed(
+            title="Audio Submission Review",
+            description="Current submission workflow settings for this server.",
+            color=discord.Color.blurple(),
+        )
+        embed.add_field(
+            name="Review Category",
+            value=f"<#{settings['reviewCategoryId']}>" if settings.get("reviewCategoryId") else "Not configured",
+            inline=False,
+        )
+        embed.add_field(
+            name="Reviewer Role",
+            value=f"<@&{settings['reviewerRoleId']}>" if settings.get("reviewerRoleId") else "Not configured",
+            inline=True,
+        )
+        embed.add_field(name="Destination", value=destination_value, inline=True)
+        embed.add_field(
+            name="Review Log",
+            value=f"<#{settings['logChannelId']}>" if settings.get("logChannelId") else "Off",
+            inline=True,
+        )
+        embed.add_field(
+            name="Temp Channel Cleanup",
+            value=format_duration(int(settings.get("closeDelayMs") or 10 * 60 * 1000)),
+            inline=True,
+        )
+        embed.set_footer(text=guild.name)
+        return embed
+
+    def build_submission_open_embed(
+        self,
+        submitter: discord.abc.User,
+        title: str,
+        notes: Optional[str],
+    ) -> discord.Embed:
+        embed = discord.Embed(
+            title="Upload Your Audio",
+            description="Drop your audio file in this private review room. When you upload it, the bot will mark it ready for admin review.",
+            color=discord.Color.blurple(),
+            timestamp=discord.utils.utcnow(),
+        )
+        embed.add_field(name="Creator", value=submitter.mention, inline=True)
+        embed.add_field(name="Title", value=title, inline=True)
+        if notes:
+            embed.add_field(name="Initial Notes", value=notes[:1024], inline=False)
+        embed.set_footer(text="Only you, reviewers, and admins can see this channel.")
+        return embed
+
+    def build_submission_review_embed(
+        self,
+        submission: dict[str, Any],
+        creator: discord.abc.User,
+        *,
+        state: str,
+        reviewer: Optional[discord.abc.User] = None,
+        decision_note: Optional[str] = None,
+    ) -> discord.Embed:
+        color = {
+            "waiting": discord.Color.blurple(),
+            "ready": discord.Color.orange(),
+            "approved": discord.Color.green(),
+            "denied": discord.Color.red(),
+        }.get(state, discord.Color.blurple())
+        title = {
+            "waiting": "Waiting For Upload",
+            "ready": "Ready For Review",
+            "approved": "Approved",
+            "denied": "Denied",
+        }.get(state, "Audio Submission")
+        embed = discord.Embed(
+            title=title,
+            description=submission.get("title") or "Untitled submission",
+            color=color,
+            timestamp=discord.utils.utcnow(),
+        )
+        embed.add_field(name="Creator", value=creator.mention, inline=True)
+        filenames = ", ".join(submission.get("attachmentNames") or []) or "No audio uploaded yet"
+        embed.add_field(name="Files", value=filenames[:1024], inline=False)
+        if submission.get("notes"):
+            embed.add_field(name="Notes", value=str(submission["notes"])[:1024], inline=False)
+        if reviewer is not None:
+            embed.add_field(name="Reviewed By", value=reviewer.mention, inline=True)
+        if decision_note:
+            embed.add_field(name="Decision Note", value=decision_note[:1024], inline=False)
+        embed.set_footer(text=f"Submission {submission['id']}")
+        return embed
+
+    def user_can_review_audio(
+        self,
+        member: discord.Member,
+        settings: dict[str, Any],
+    ) -> bool:
+        if member.guild_permissions.administrator or member.guild_permissions.manage_messages:
+            return True
+        reviewer_role_id = settings.get("reviewerRoleId")
+        if not reviewer_role_id:
+            return False
+        return any(str(role.id) == str(reviewer_role_id) for role in member.roles)
+
+    async def update_submission_review_message(
+        self,
+        guild: discord.Guild,
+        channel: discord.TextChannel,
+        submission: dict[str, Any],
+        creator: discord.abc.User,
+        *,
+        state: str,
+        reviewer: Optional[discord.abc.User] = None,
+        decision_note: Optional[str] = None,
+        mention_reviewers: bool = False,
+    ) -> None:
+        embed = self.build_submission_review_embed(
+            submission,
+            creator,
+            state=state,
+            reviewer=reviewer,
+            decision_note=decision_note,
+        )
+        settings = self.get_audio_review_settings(guild.id)
+        mention = f"<@&{settings['reviewerRoleId']}>" if mention_reviewers and settings.get("reviewerRoleId") else None
+        review_message_id = submission.get("reviewMessageId")
+
+        if review_message_id:
+            try:
+                existing = await channel.fetch_message(int(review_message_id))
+                await existing.edit(content=mention if mention_reviewers else None, embed=embed)
+                return
+            except discord.HTTPException:
+                pass
+
+        created = await channel.send(
+            mention or None,
+            embed=embed,
+            allowed_mentions=discord.AllowedMentions(roles=True, users=False, everyone=False),
+        )
+        submission["reviewMessageId"] = str(created.id)
+
+    async def log_audio_review_event(
+        self,
+        guild: discord.Guild,
+        settings: dict[str, Any],
+        message: str,
+    ) -> None:
+        channel = await self.resolve_audio_review_log_channel(guild, settings)
+        if channel is not None:
+            try:
+                await channel.send(message, allowed_mentions=discord.AllowedMentions.none())
+                return
+            except discord.HTTPException:
+                pass
+
+    async def post_submission_to_destination(
+        self,
+        guild: discord.Guild,
+        submission: dict[str, Any],
+        reviewer: discord.abc.User,
+    ) -> tuple[str, Optional[str]]:
+        settings = self.get_audio_review_settings(guild.id)
+        destination = await self.resolve_audio_review_destination(guild, settings)
+        if destination is None:
+            raise RuntimeError("Audio destination is not configured anymore.")
+
+        review_channel = guild.get_channel(int(submission["channelId"]))
+        if not isinstance(review_channel, discord.TextChannel):
+            raise RuntimeError("The submission channel no longer exists.")
+
+        source_message = await review_channel.fetch_message(int(submission["audioMessageId"]))
+        creator = guild.get_member(int(submission["submitterId"])) or await self.fetch_user(int(submission["submitterId"]))
+        upload_limit = getattr(guild, "filesize_limit", 8 * 1024 * 1024)
+        assert self.http_session is not None
+        file_batches, filename_batches, skipped = await build_attachment_batches(
+            self.http_session,
+            source_message,
+            upload_limit,
+            audio_only=True,
+        )
+        if not file_batches:
+            raise RuntimeError("No audio files were available to post.")
+
+        destination_label = getattr(destination, "mention", str(destination))
+        created_jump_url: Optional[str] = None
+        summary_embed = discord.Embed(
+            title=submission.get("title") or (filename_batches[0][0] if filename_batches and filename_batches[0] else "Approved Audio"),
+            color=discord.Color.green(),
+            timestamp=discord.utils.utcnow(),
+        )
+        summary_embed.add_field(name="Creator", value=creator.mention, inline=True)
+        summary_embed.add_field(name="Approved By", value=reviewer.mention, inline=True)
+        if submission.get("notes"):
+            summary_embed.add_field(name="Notes", value=str(submission["notes"])[:1024], inline=False)
+        if skipped:
+            summary_embed.add_field(name="Skipped", value=", ".join(skipped)[:1024], inline=False)
+
+        if isinstance(destination, discord.ForumChannel):
+            created = await destination.create_thread(
+                name=(submission.get("title") or filename_batches[0][0] or "Approved Audio")[:100],
+                content=build_creator_caption(creator.id),
+                files=file_batches[0],
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            created_jump_url = created.message.jump_url if created.message is not None else None
+            for batch in file_batches[1:]:
+                await created.thread.send(files=batch, allowed_mentions=discord.AllowedMentions.none())
+            await created.thread.send(embed=summary_embed, allowed_mentions=discord.AllowedMentions.none())
+            destination_label = created.thread.mention
+        else:
+            first_message = await destination.send(files=file_batches[0], allowed_mentions=discord.AllowedMentions.none())
+            created_jump_url = first_message.jump_url
+            for batch in file_batches[1:]:
+                await destination.send(files=batch, allowed_mentions=discord.AllowedMentions.none())
+            await destination.send(build_creator_caption(creator.id), allowed_mentions=discord.AllowedMentions.none())
+            await destination.send(embed=summary_embed, allowed_mentions=discord.AllowedMentions.none())
+
+        return destination_label, created_jump_url
+
+    async def capture_submission_audio(self, message: discord.Message) -> bool:
+        if message.guild is None or not isinstance(message.channel, discord.TextChannel):
+            return False
+
+        submission = self.get_audio_submission_for_channel(message.guild.id, message.channel.id)
+        if submission is None or str(submission.get("submitterId")) != str(message.author.id):
+            return False
+
+        audio_attachments = [attachment for attachment in get_effective_attachments(message) if is_audio_attachment(attachment)]
+        if not audio_attachments:
+            return False
+
+        submission["audioMessageId"] = str(message.id)
+        submission["attachmentNames"] = [attachment.filename for attachment in audio_attachments]
+        submission["status"] = "ready"
+        extra_notes = (message.content or "").strip()
+        if extra_notes:
+            submission["notes"] = f"{submission.get('notes', '').strip()}\n\n{extra_notes}".strip()
+
+        await self.update_submission_review_message(
+            message.guild,
+            message.channel,
+            submission,
+            message.author,
+            state="ready",
+            mention_reviewers=True,
+        )
+        self.store.save()
+        await self.log_audio_review_event(
+            message.guild,
+            self.get_audio_review_settings(message.guild.id),
+            f"Submission `{submission['id']}` is ready for review in {message.channel.mention}.",
+        )
+        return True
+
     async def search_audio_in_source(
         self,
         source_obj: discord.abc.Messageable,
@@ -863,20 +1225,7 @@ class MotionXBot(commands.Bot):
                         await self.send_audio_search_results_message(message, query, matches[:5])
 
         if message.guild is not None:
-            guild_data = self.store.get_guild_data(message.guild.id)
-            for rule in guild_data.get("autoResponses", []):
-                if not rule.get("enabled", True):
-                    continue
-                if not self.matches_auto_response(message, rule):
-                    continue
-                try:
-                    await message.channel.send(
-                        str(rule.get("response") or ""),
-                        allowed_mentions=discord.AllowedMentions.none(),
-                    )
-                except discord.HTTPException:
-                    pass
-                break
+            await self.capture_submission_audio(message)
 
         await self.process_commands(message)
 
@@ -889,9 +1238,6 @@ class MotionXBot(commands.Bot):
 
             guild_data = self.store.get_guild_data(guild_id)
             current_ms = now_ms()
-            await self.process_reminders(guild, guild_data, current_ms)
-            await self.process_jobs(guild, guild_data, current_ms)
-            await self.process_heartbeat(guild, guild_data, current_ms)
             await self.process_channel_timers(guild, guild_data, current_ms)
 
         self.store.save()
@@ -1035,7 +1381,7 @@ class MotionXBot(commands.Bot):
 
         guild_data["channelTimers"] = remaining_timers
 
-    def register_app_commands(self) -> None:
+    def register_legacy_commands(self) -> None:
         tree = self.tree
 
         @tree.error
@@ -3219,6 +3565,9 @@ class MotionXBot(commands.Bot):
         tree.add_command(logchannel_group)
         tree.add_command(heartbeat_group)
         tree.add_command(transfer_group)
+
+    def register_app_commands(self) -> None:
+        register_commands(self)
 
 
 async def run_bot() -> None:

@@ -7,21 +7,17 @@ from typing import Any
 
 def create_guild_defaults() -> dict[str, Any]:
     return {
-        "logChannelId": None,
-        "autoRoles": [],
         "channelTimers": [],
-        "reminders": [],
-        "jobs": [],
-        "tags": {},
-        "templates": {},
-        "checklists": {},
-        "todos": [],
-        "approvals": {},
-        "heartbeat": None,
         "warnings": [],
-        "modNotes": [],
-        "autoResponses": [],
-        "whispers": [],
+        "audioReview": {
+            "reviewCategoryId": None,
+            "reviewerRoleId": None,
+            "destinationType": None,
+            "destinationId": None,
+            "logChannelId": None,
+            "closeDelayMs": 10 * 60 * 1000,
+        },
+        "audioSubmissions": [],
     }
 
 
@@ -30,20 +26,13 @@ def normalize_guild_data(data: dict[str, Any] | None = None) -> dict[str, Any]:
     return {
         **create_guild_defaults(),
         **incoming,
-        "autoRoles": list(incoming.get("autoRoles") or []),
         "channelTimers": list(incoming.get("channelTimers") or []),
-        "reminders": list(incoming.get("reminders") or []),
-        "jobs": list(incoming.get("jobs") or []),
-        "tags": dict(incoming.get("tags") or {}),
-        "templates": dict(incoming.get("templates") or {}),
-        "checklists": dict(incoming.get("checklists") or {}),
-        "todos": list(incoming.get("todos") or []),
-        "approvals": dict(incoming.get("approvals") or {}),
-        "heartbeat": incoming.get("heartbeat") or None,
         "warnings": list(incoming.get("warnings") or []),
-        "modNotes": list(incoming.get("modNotes") or []),
-        "autoResponses": list(incoming.get("autoResponses") or []),
-        "whispers": list(incoming.get("whispers") or []),
+        "audioReview": {
+            **create_guild_defaults()["audioReview"],
+            **dict(incoming.get("audioReview") or {}),
+        },
+        "audioSubmissions": list(incoming.get("audioSubmissions") or []),
     }
 
 
